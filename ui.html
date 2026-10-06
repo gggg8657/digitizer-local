@@ -1,0 +1,807 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>digitizer local — 그래프 디지타이저</title>
+<style>
+  :root{--bg:#f5f6f8;--fg:#1d2026;--muted:#6b7280;--line:#d9dce2;--acc:#1f5fa8;--panel:#fff;--soft:#eef0f4;--warn:#a15c00;--err:#b3261e;--ok:#2e7d32}
+  body.dark{--bg:#18191c;--fg:#e6e7ea;--muted:#9aa0a8;--line:#3b3e45;--panel:#222429;--soft:#2a2c32;--acc:#6aa5e8;--warn:#e0a24a}
+  *{box-sizing:border-box}
+  body{font:13.5px/1.5 -apple-system,"Pretendard","Apple SD Gothic Neo","Malgun Gothic",system-ui,sans-serif;background:var(--bg);color:var(--fg);margin:0;padding:10px 14px 0;height:100vh;display:flex;flex-direction:column}
+  h1{font-size:17px;margin:0 0 8px}h1 small{font-weight:400;color:var(--muted);font-size:12.5px}
+  .main{display:flex;gap:12px;flex:1;min-height:0}
+  .left{width:400px;min-width:320px;display:flex;flex-direction:column;min-height:0}
+  .right{flex:1;display:flex;flex-direction:column;gap:6px;min-width:0;min-height:0}
+  .tabs{display:flex;gap:3px;margin-bottom:6px}.tabs button{flex:1;padding:6px 4px;font-size:12.5px}
+  .tabs button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
+  .tabs button.done::after{content:" ✓";color:var(--ok)}.tabs button.on.done::after{color:#cfe9d1}
+  .pane{flex:1;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:10px 12px}
+  .pane[hidden]{display:none}
+  fieldset{border:none;border-top:1px solid var(--line);margin:0 0 4px;padding:8px 0 4px}
+  fieldset:first-child{border-top:none;padding-top:0}
+  legend{font-weight:700;font-size:12.5px;color:var(--acc);padding:0 6px 0 0}
+  label{font-size:12px;color:var(--muted)}
+  label.blk{display:block;margin:6px 0 2px}
+  input,select,textarea,button{font:inherit;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg)}
+  input[type=text],input[type=number],select,textarea{width:100%}
+  input[type=color]{padding:0 2px;width:40px;height:30px}
+  input[type=checkbox]{vertical-align:-2px}
+  button{cursor:pointer;white-space:nowrap}button.primary{background:var(--acc);color:#fff;border-color:var(--acc);font-weight:600}
+  button:disabled{opacity:.5;cursor:default}button.on{outline:2px solid var(--acc);border-color:var(--acc);font-weight:700}
+  .row{display:flex;gap:6px;align-items:center}.row>.g{flex:1;min-width:0}
+  .hint{font-size:11.5px;color:var(--muted);margin-top:3px}
+  .err{color:var(--err);font-size:12px;white-space:pre-wrap}.warn{color:var(--warn);font-size:12px;white-space:pre-wrap}.err,.warn,#imgInfo,#autoMsg,#outMsg,#histList{overflow-wrap:anywhere}fieldset{min-width:0}.ok{color:var(--ok);font-size:12px}
+  .bar{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+  .bar .sep{width:1px;height:22px;background:var(--line);margin:0 3px}
+  #wrap{flex:1;position:relative;border:1px solid var(--line);border-radius:8px;background:var(--soft);overflow:hidden;min-height:300px}
+  #cv{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
+  #loupe{position:absolute;top:8px;right:8px;width:150px;height:150px;border:2px solid var(--acc);border-radius:6px;background:#fff;pointer-events:none;box-shadow:0 2px 10px rgba(0,0,0,.25)}
+  #drop[hidden]{display:none}
+  #drop{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:6px;color:var(--muted);font-size:14px;text-align:center;pointer-events:none}
+  #status{font-size:12px;color:var(--muted);min-height:18px;font-variant-numeric:tabular-nums}
+  .drop{border:2px dashed var(--line);border-radius:8px;padding:16px;text-align:center;color:var(--muted);cursor:pointer}
+  .drop.over{border-color:var(--acc);color:var(--acc)}
+  .pages{display:grid;grid-template-columns:repeat(auto-fill,minmax(74px,1fr));gap:6px;margin-top:6px;max-height:300px;overflow:auto}
+  .pages div{border:1px solid var(--line);border-radius:4px;padding:2px;text-align:center;font-size:11px;cursor:pointer;background:#fff;color:#333}
+  .pages div.on{outline:2px solid var(--acc)}.pages img{width:100%;display:block;min-height:40px}
+  table{border-collapse:collapse;width:100%;font-size:12px;font-variant-numeric:tabular-nums}
+  th,td{border-bottom:1px solid var(--line);padding:3px 5px;text-align:right}th{color:var(--muted);font-weight:600;position:sticky;top:0;background:var(--panel)}
+  td.l,th.l{text-align:left}
+  .ser{display:flex;align-items:center;gap:6px;padding:4px 6px;border:1px solid var(--line);border-radius:6px;margin-bottom:4px;cursor:pointer}
+  .ser.on{border-color:var(--acc);box-shadow:inset 3px 0 0 var(--acc)}
+  .sw{width:16px;height:16px;border-radius:3px;border:1px solid rgba(0,0,0,.3);flex:none}
+  .chips{display:flex;gap:4px;flex-wrap:wrap;margin-top:4px}.chips button{padding:2px 6px;font-size:11.5px;display:flex;gap:4px;align-items:center}
+  .ser .n{margin-left:auto;color:var(--muted);font-size:11.5px;flex:none}.ser>span:nth-child(2){min-width:0;overflow-wrap:anywhere}
+  .ser .x{border:none;background:none;padding:0 2px;color:var(--muted)}
+  .cal{display:grid;grid-template-columns:52px 1fr 1fr;gap:4px 6px;align-items:center;margin-top:4px}
+  .cal .p{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+  #recon{width:100%;height:240px;border:1px solid var(--line);border-radius:6px;background:#fff}
+  .panels{display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:6px;margin-top:6px}
+  .panels div{border:1px solid var(--line);border-radius:6px;padding:3px;text-align:center;font-size:11.5px;cursor:pointer;background:#fff;color:#333;min-width:0}
+  .panels div:hover{outline:2px solid var(--acc)}.panels div.off{opacity:.55}.panels canvas{max-width:100%;height:auto;display:block;margin:0 auto 2px}
+  .bl{display:flex;gap:6px;align-items:center;margin-bottom:3px}.bl input{flex:1;min-width:0}.bl .k{color:var(--muted);font-size:11.5px;flex:none;min-width:18px;text-align:right}
+  .kbd{font-size:11px;border:1px solid var(--line);border-radius:3px;padding:0 3px;background:var(--soft)}
+  details summary{cursor:pointer;color:var(--muted);font-size:12px}
+  pre{white-space:pre-wrap;font-size:11px;background:var(--soft);padding:6px;border-radius:6px;max-height:160px;overflow:auto}
+  @media (max-width:900px){body{height:auto}.main{flex-direction:column}.left{width:auto}#wrap{min-height:65vh}}
+</style>
+</head>
+<body>
+<h1>그래프 디지타이저 <small>— 논문·보고서 그래프 그림 → 숫자 데이터 · 축 보정(AI 보조) · 색으로 곡선·점 추출 · CSV/엑셀</small></h1>
+<div class="main">
+  <div class="left">
+    <div class="tabs"><button data-tab="tImg" class="on">1 그림</button><button data-tab="tCal">2 축 보정</button><button data-tab="tSer">3 데이터</button><button data-tab="tOut">4 결과</button><button data-tab="tHist">이력</button></div>
+
+    <div class="pane" id="tImg">
+      <div class="drop" id="dropBox">그림(PNG·JPG) 또는 PDF 를 끌어 놓거나 <b>클릭</b>해서 고르세요<br><span class="kbd">Ctrl</span>+<span class="kbd">V</span> 로 스크린샷 붙여넣기</div>
+      <input type="file" id="file" accept="image/*,.pdf,application/pdf" hidden>
+      <div id="pdfBox" hidden>
+        <fieldset><legend>PDF 쪽 고르기</legend>
+          <div class="row"><span id="pdfInfo" class="hint g"></span><label>해상도</label><select id="pdfDpi" style="width:auto"><option>150</option><option selected>200</option><option>300</option><option>400</option></select></div>
+          <div class="pages" id="pages"></div>
+          <div class="row" style="margin-top:6px"><button class="primary" id="pdfLoad" disabled>이 쪽 불러오기</button><span class="hint">불러온 뒤 <b>✂ 자르기</b>로 그래프만 남기면 정확해집니다</span></div>
+        </fieldset>
+      </div>
+      <fieldset><legend>그림</legend>
+        <div id="imgInfo" class="hint">아직 그림이 없습니다.</div>
+        <div class="bar" style="margin-top:6px"><button id="cropBtn" title="그래프 부분만 남기기 (드래그)">✂ 자르기</button><button id="undoCrop" hidden>원래 그림으로</button></div>
+        <div class="hint">여러 그래프가 있는 그림·PDF 쪽은 아래 목록에서 하나를 고르거나, ✂ 자르기로 영역을 끌어 고르세요. 고른 부분은 새 그림으로 저장됩니다.</div>
+      </fieldset>
+      <fieldset id="panelBox" hidden><legend>그래프 고르기</legend>
+        <div id="panelMsg" class="warn"></div>
+        <div class="panels" id="panels"></div>
+        <div class="hint">누르면 그 그래프만 잘라 ✨ 자동 보정까지 합니다. 흐린 칸은 지도·사진처럼 보여 뺀 것입니다(그래도 고를 수 있음).</div>
+      </fieldset>
+      <fieldset><legend>순서</legend>
+        <ol class="hint" style="padding-left:18px;margin:2px 0">
+          <li><b>축 보정</b> — ✨ AI 자동 보정 또는 축 위의 두 점씩 클릭하고 값 입력</li>
+          <li><b>데이터</b> — 계열 색을 고르고(스포이트·AI 제안) <b>추출</b>, 필요하면 점을 손으로 고치기</li>
+          <li><b>결과</b> — 원본 위 겹쳐 보기·재구성 그래프로 확인 → CSV/엑셀</li>
+        </ol>
+        <div class="hint">좌표는 AI 가 짐작하지 않고, 픽셀 위치와 축 보정으로 계산합니다. AI 는 눈금 숫자·범례 이름만 읽습니다.</div>
+      </fieldset>
+    </div>
+
+    <div class="pane" id="tCal" hidden>
+      <fieldset><legend>AI 자동 보정</legend>
+        <div class="row" style="flex-wrap:wrap"><button class="primary" id="autoBtn">✨ AI 자동 보정</button><select id="model" style="width:auto;max-width:150px" title="이미지 입력이 되는 모델"></select><select id="chart" style="width:auto" title="그래프 종류 — 자동이면 AI 와 막대 검출로 고릅니다"><option value="auto">종류: 자동</option><option value="xy">선·점 그래프</option><option value="vbar">막대 (세로)</option><option value="hbar">막대 (가로)</option></select></div>
+        <div class="hint">축선·눈금·눈금 글자 위치는 그림에서 찾고, 눈금 숫자는 로컬 AI 가 읽어 짝지은 뒤 최소제곱으로 맞춥니다.</div>
+        <div id="autoMsg"></div>
+        <details style="margin-top:4px"><summary>AI 없이: 눈금 값을 직접 입력해 검출 위치에 맞추기</summary>
+          <label class="blk">x 눈금 값 (왼쪽 → 오른쪽, 쉼표)</label><input type="text" id="xvals" placeholder="예: 0, 2, 4, 6, 8, 10">
+          <label class="blk">y 눈금 값 (아래 → 위)</label><input type="text" id="yvals" placeholder="예: 1, 10, 100, 1000">
+          <button id="fitBtn" style="margin-top:6px">검출한 눈금에 맞추기</button>
+        </details>
+        <div id="pairs"></div>
+      </fieldset>
+      <fieldset><legend>수동 보정 — 축 위 두 점씩 클릭 후 값 입력</legend>
+        <div class="cal">
+          <span></span><span class="hint">점 1</span><span class="hint">점 2</span>
+          <b>x 축</b><div class="row"><button data-cp="x1" class="cpb">X1</button><input type="text" id="xv1" placeholder="값"></div><div class="row"><button data-cp="x2" class="cpb">X2</button><input type="text" id="xv2" placeholder="값"></div>
+          <span></span><span class="p" id="xp1">—</span><span class="p" id="xp2">—</span>
+          <b>y 축</b><div class="row"><button data-cp="y1" class="cpb">Y1</button><input type="text" id="yv1" placeholder="값"></div><div class="row"><button data-cp="y2" class="cpb">Y2</button><input type="text" id="yv2" placeholder="값"></div>
+          <span></span><span class="p" id="yp1">—</span><span class="p" id="yp2">—</span>
+        </div>
+        <div class="row" style="margin-top:6px"><label><input type="checkbox" id="xlog"> x 로그축</label><label><input type="checkbox" id="ylog"> y 로그축</label></div>
+        <div class="hint">눈금선 위(가능하면 양 끝 눈금)를 확대해서 찍으세요. 돋보기 십자선 가운데가 찍히는 곳입니다. 점은 끌어서 옮길 수 있습니다.</div>
+        <div id="calMsg" class="hint"></div>
+      </fieldset>
+      <fieldset><legend>그림 영역 (추출 범위)</legend>
+        <div class="row"><button id="boxBtn" data-tool="box" class="toolb">▭ 영역 다시 그리기</button><span id="boxInfo" class="hint g"></span></div>
+        <div class="hint">축선 안쪽만 추출합니다. 축선·바깥 글자는 자동으로 빠집니다.</div>
+      </fieldset>
+    </div>
+
+    <div class="pane" id="tSer" hidden>
+      <fieldset id="barBox" hidden><legend>막대 (자동 검출)</legend>
+        <div id="barInfo" class="hint"></div>
+        <label class="blk">계열 이름 (범례 — 색·무늬로 짝지음)</label><div id="barSer"></div>
+        <label class="blk">범주 이름 (막대 번호 순)</label><div id="barCats"></div>
+        <div class="bar" style="margin-top:6px"><button data-tool="baredit" class="toolb">✎ 막대 끝 고치기</button><button id="barOff">막대 결과 지우기</button></div>
+        <div class="hint">✎ 를 켜고 그림의 ◆(조각 위 끝)·＋(오차 끝)를 위아래로 끌면 값이 바뀝니다. 결과 탭에서 표를 확인하고 내려받으세요.</div>
+      </fieldset>
+      <fieldset id="serBox"><legend>계열</legend>
+        <div id="serList"></div>
+        <div class="bar"><button id="addSer">+ 계열 추가</button><button id="aiSer" title="AI 가 읽은 범례 이름 + 그림에서 찾은 색" hidden>✨ 제안 계열로 채우기</button></div>
+        <div class="chips" id="colorChips"></div>
+      </fieldset>
+      <fieldset id="serEd"><legend>현재 계열</legend>
+        <div class="row"><div class="g"><input type="text" id="sName" placeholder="계열 이름"></div><input type="color" id="sColor" title="계열 색"><button id="pickBtn" data-tool="pick" class="toolb" title="그림에서 색 고르기">💧 스포이트</button></div>
+        <label class="blk">추출 방식</label>
+        <select id="sMode"><option value="line">자동 — 곡선 (열마다 중심)</option><option value="points">자동 — 점 (표식 중심)</option><option value="manual">수동 — 점을 직접 찍기</option></select>
+        <div id="autoOpts">
+          <label class="blk">색 허용오차 <b id="tolV"></b></label><input type="range" id="sTol" min="10" max="160" step="2" style="width:100%">
+          <div id="lineOpts">
+            <label class="blk">출력 점</label>
+            <div class="row"><select id="sHow" style="width:auto"><option value="n">점 수</option><option value="step">x 간격</option><option value="all">열마다 전부</option></select><input type="number" id="sN" min="2" value="50"><input type="text" id="sStep" placeholder="예: 0.5" hidden></div>
+            <div class="hint" id="howHint"></div>
+          </div>
+          <div id="ptOpts" hidden><label class="blk">최소 표식 크기 (픽셀 수)</label><input type="number" id="sMin" min="1" value="6"></div>
+          <div class="row" style="margin-top:6px;flex-wrap:wrap"><label><input type="checkbox" id="sLines" checked> 같은 색 격자선·직선 빼기</label><label><input type="checkbox" id="sLegend" checked> 범례 상자 빼기</label></div>
+          <div class="bar" style="margin-top:6px"><button class="primary" id="runBtn">▶ 추출</button><button id="exBtn" data-tool="exclude" class="toolb" title="드래그로 제외 영역 (글자·주석 등). 다시 클릭하면 지움">⊘ 제외 영역</button><label><input type="checkbox" id="showMask"> 마스크 보기</label></div>
+        </div>
+        <div class="bar" style="margin-top:6px"><button id="editBtn" data-tool="edit" class="toolb">✎ 점 편집</button><button id="clrBtn">점 모두 지우기</button></div>
+        <div class="hint">점 편집: 빈 곳 클릭 = 추가 · 점 끌기 = 이동 · <b>Shift+클릭</b>·우클릭 = 삭제 · 휠 = 확대</div>
+        <div id="serMsg"></div>
+      </fieldset>
+    </div>
+
+    <div class="pane" id="tOut" hidden>
+      <fieldset><legend>재구성 그래프 (추출한 숫자로 다시 그림)</legend>
+        <canvas id="recon"></canvas>
+        <div class="hint">원본과 모양이 같은지 비교하세요. 원본 위 겹쳐 보기는 오른쪽 화면(점 표시)에서.</div>
+      </fieldset>
+      <fieldset><legend>내보내기</legend>
+        <label class="blk">이름</label><input type="text" id="pName" placeholder="예: Fig3_열전도도">
+        <div class="bar" style="margin-top:6px"><button class="primary" id="dlCsv">CSV</button><button id="dlXlsx">엑셀 (XLSX)</button><button id="copyBtn">클립보드 복사</button><button id="dlOverlay">겹쳐 보기 PNG</button><button id="saveBtn">이력에 저장</button></div>
+        <div id="outMsg" class="hint"></div>
+      </fieldset>
+      <fieldset><legend>표 미리보기</legend>
+        <div style="max-height:320px;overflow:auto" id="tbl"></div>
+      </fieldset>
+    </div>
+
+    <div class="pane" id="tHist" hidden>
+      <div class="bar" style="margin-bottom:6px"><button id="histRefresh">새로고침</button><span class="hint">'이력에 저장'·내려받기 한 작업이 남습니다 (그림·보정·점)</span></div>
+      <div id="histList"></div>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="bar">
+      <button data-tool="pan" class="toolb on" title="끌어서 이동">✋ 이동</button>
+      <button data-tool="edit" class="toolb">✎ 점 편집</button>
+      <button data-tool="pick" class="toolb">💧 스포이트</button>
+      <span class="sep"></span>
+      <button id="zIn" title="확대">＋</button><button id="zOut" title="축소">－</button><button id="zFit">맞춤</button><button id="z1">1:1</button>
+      <span class="sep"></span>
+      <label><input type="checkbox" id="vPts" checked> 점</label><label><input type="checkbox" id="vTicks" checked> 눈금</label><label><input type="checkbox" id="vLoupe" checked> 돋보기</label>
+      <span class="sep"></span><button id="theme" title="어둡게/밝게">🌓</button>
+    </div>
+    <div id="wrap"><canvas id="cv"></canvas><canvas id="loupe" width="150" height="150"></canvas><div id="drop"><div style="font-size:40px">📈</div><div>그래프 그림을 끌어 놓거나 <b>Ctrl+V</b></div></div></div>
+    <div id="status">&nbsp;</div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const store = { get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } },
+                set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} } };
+const PALETTE = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd', '#8c564b', '#e377c2', '#17becf'];
+let S = blank(), META = {}, IMG = null, PIX = null, prevImg = null, pdf = null, pdfPage = 0;
+let view = { z: 1, ox: 0, oy: 0 }, tool = 'pan', calTarget = null, drag = null, hover = null, mouse = null, maskImg = null;
+
+function blank() { return { img: null, calib: { x: { p1: null, p2: null, v1: '', v2: '', log: false }, y: { p1: null, p2: null, v1: '', v2: '', log: false } },
+  box: null, excludes: [], series: [], cur: 0, name: '', pid: null, det: null, bar: null, panels: null }; }
+function newSeries(i, name, color) { return { name: name || `계열 ${i + 1}`, color: color || PALETTE[i % PALETTE.length], tol: 60, mode: 'line', how: 'n', n: 50, step: '', min_area: 6, remove_lines: true, skip_legend: true, px: [], warn: [] }; }
+function cs() { return S.series[S.cur]; }
+async function api(path, body) {
+  const r = await fetch('api/' + path, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const ct = r.headers.get('content-type') || '';
+  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).error || m; } catch (e) {} throw new Error(m); }
+  return ct.includes('json') ? r.json() : r;
+}
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function fmt(v) { if (!isFinite(v)) return ''; const a = Math.abs(v); return (a !== 0 && (a < 1e-3 || a >= 1e6)) ? v.toExponential(4) : (+v.toPrecision(6)).toString(); }
+function parseNum(s) {
+  s = String(s ?? '').trim().replace(/,/g, '').replace(/[−–]/g, '-').replace(/\s/g, ''); if (!s) return NaN;
+  const m = s.match(/^(-?[\d.]*)[×x*]?10\^\{?(-?[\d.]+)\}?$/); if (m) return (m[1] === '' ? 1 : m[1] === '-' ? -1 : +m[1]) * 10 ** +m[2];
+  return Number(s);
+}
+function persist() { store.set('digitizer-state', S); }
+
+// ── 보정 (digitize.py 와 같은 식) ─────────────────────────────────────
+function calOK(c = S.calib) {
+  for (const k of ['x', 'y']) { const a = c[k]; if (!a.p1 || !a.p2) return false;
+    const v1 = parseNum(a.v1), v2 = parseNum(a.v2); if (!isFinite(v1) || !isFinite(v2) || v1 === v2) return false;
+    if (a.log && (v1 <= 0 || v2 <= 0)) return false; if (Math.hypot(a.p2[0] - a.p1[0], a.p2[1] - a.p1[1]) < 1e-6) return false; }
+  return true;
+}
+function calJSON() { const o = {}; for (const k of ['x', 'y']) { const a = S.calib[k]; o[k] = { p1: a.p1, p2: a.p2, v1: parseNum(a.v1), v2: parseNum(a.v2), log: !!a.log, cat: !!a.cat }; } return o; }
+function mat() {
+  return ['x', 'y'].map(k => { const a = S.calib[k], f = v => a.log ? Math.log10(v) : v;
+    const u = [a.p2[0] - a.p1[0], a.p2[1] - a.p1[1]], n2 = u[0] * u[0] + u[1] * u[1], f1 = f(parseNum(a.v1)), f2 = f(parseNum(a.v2)), s = (f2 - f1) / n2;
+    return [s * u[0], s * u[1], f1 - s * (u[0] * a.p1[0] + u[1] * a.p1[1])]; });
+}
+function toData(px, py) { const M = mat(); let x = M[0][0] * px + M[0][1] * py + M[0][2], y = M[1][0] * px + M[1][1] * py + M[1][2];
+  if (S.calib.x.log) x = 10 ** x; if (S.calib.y.log) y = 10 ** y; return [x, y]; }
+function toPix(x, y) { const M = mat(); const xp = S.calib.x.log ? Math.log10(x) : x, yp = S.calib.y.log ? Math.log10(y) : y;
+  const a = M[0][0], b = M[0][1], c = M[1][0], d = M[1][1], det = a * d - b * c, X = xp - M[0][2], Y = yp - M[1][2];
+  return [(d * X - b * Y) / det, (-c * X + a * Y) / det]; }
+function seriesData(s) { if (!calOK()) return []; return s.px.map(p => toData(p[0], p[1])).sort((a, b) => a[0] - b[0]); }
+
+// ── 그림 불러오기 ────────────────────────────────────────────────────
+function readAs(file) { return new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = no; r.readAsDataURL(file); }); }
+async function takeFile(file) {
+  if (!file) return;
+  try {
+    const data = await readAs(file);
+    if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) return openPdf(data, file.name);
+    $('imgInfo').textContent = '올리는 중…';
+    const r = await api('image', { data });
+    S = blank(); S.name = file.name ? file.name.replace(/\.[^.]+$/, '') : ''; await setImage(r, true);
+  } catch (e) { $('imgInfo').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+async function openPdf(data, name) {
+  $('pdfBox').hidden = false; $('pdfInfo').textContent = 'PDF 여는 중…';
+  pdf = await api('pdf', { data }); pdf.name = name || 'pdf'; pdfPage = 0;
+  $('pdfInfo').textContent = `${pdf.pages}쪽 — 그래프가 있는 쪽을 고르세요`;
+  const box = $('pages'); box.innerHTML = '';
+  for (let i = 1; i <= Math.min(pdf.pages, 300); i++) {
+    const d = document.createElement('div'); d.innerHTML = `<img loading="lazy" src="api/pdfpage/${pdf.id}/${i}.png?dpi=24" alt=""><span>${i}</span>`;
+    d.onclick = () => { pdfPage = i; box.querySelectorAll('div').forEach(x => x.classList.toggle('on', x === d)); $('pdfLoad').disabled = false; };
+    d.ondblclick = () => $('pdfLoad').click();
+    box.appendChild(d);
+  }
+}
+$('pdfLoad').onclick = async () => {
+  if (!pdf || !pdfPage) return; $('pdfLoad').disabled = true; $('imgInfo').textContent = `${pdfPage}쪽 그림으로 바꾸는 중…`;
+  try { const r = await api('pdfpage', { id: pdf.id, page: pdfPage, dpi: +$('pdfDpi').value }); S = blank(); S.name = `${pdf.name.replace(/\.pdf$/i, '')}_p${pdfPage}`; await setImage(r, true);
+    $('imgInfo').innerHTML += ' — <b>✂ 자르기</b>로 그래프만 남기세요'; }
+  catch (e) { $('imgInfo').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+  $('pdfLoad').disabled = false;
+};
+function loadImg(src) { return new Promise((ok, no) => { const im = new Image(); im.onload = () => ok(im); im.onerror = () => no(new Error('그림을 못 읽었습니다')); im.src = src; }); }
+async function setImage(info, detect) {
+  S.img = { id: info.id, w: info.w, h: info.h };
+  IMG = await loadImg(`api/img/${info.id}.png`);
+  const c = document.createElement('canvas'); c.width = IMG.width; c.height = IMG.height; const g = c.getContext('2d'); g.drawImage(IMG, 0, 0);
+  PIX = g.getImageData(0, 0, IMG.width, IMG.height); maskImg = null;
+  $('drop').hidden = true; $('imgInfo').textContent = `${info.w} × ${info.h} 픽셀`; showPanels(S.panels);
+  fit(); syncAll(); persist();
+  if (detect) { await autoCal(false); }
+}
+$('dropBox').onclick = () => $('file').click();
+$('file').onchange = e => { takeFile(e.target.files[0]); e.target.value = ''; };
+for (const el of [$('dropBox'), $('wrap')]) {
+  el.addEventListener('dragover', e => { e.preventDefault(); $('dropBox').classList.add('over'); });
+  el.addEventListener('dragleave', () => $('dropBox').classList.remove('over'));
+  el.addEventListener('drop', e => { e.preventDefault(); $('dropBox').classList.remove('over'); takeFile(e.dataTransfer.files[0]); });
+}
+document.addEventListener('paste', e => {
+  if (/INPUT|TEXTAREA/.test(document.activeElement?.tagName) && !(e.clipboardData.files || []).length) return;
+  const f = [...(e.clipboardData.files || [])].find(f => f.type.startsWith('image/') || f.type === 'application/pdf');
+  if (f) { e.preventDefault(); takeFile(f); }
+});
+$('cropBtn').onclick = () => { if (!S.img) return; setTool('crop'); status('자를 부분을 드래그하세요 (그래프와 눈금 글자까지 포함)'); };
+async function doCrop(r) {
+  const [x0, y0, x1, y1] = r.map(Math.round); if (x1 - x0 < 30 || y1 - y0 < 30) return;
+  prevImg = { ...S.img }; const name = S.name;
+  const info = await api('crop', { id: S.img.id, box: [x0, y0, x1, y1] }); S = blank(); S.name = name; await setImage(info, true);
+  $('undoCrop').hidden = false; setTool('pan');
+}
+$('undoCrop').onclick = async () => { if (!prevImg) return; const name = S.name; S = blank(); S.name = name; await setImage(prevImg, true); $('undoCrop').hidden = true; };
+
+// ── 축 보정 ─────────────────────────────────────────────────────────
+async function autoCal(useVlm = true, xvals = null, yvals = null) {
+  if (!S.img) return;
+  const msg = $('autoMsg'); msg.innerHTML = `<span class="hint">${useVlm ? 'AI 가 눈금 숫자·범례를 읽는 중… (10~60초)' : '축·눈금 찾는 중…'}</span>`;
+  $('autoBtn').disabled = true;
+  try {
+    const r = await api('auto', { id: S.img.id, vlm: useVlm, model: $('model').value || null, xvals, yvals, chart: $('chart').value });
+    if (r.need_panel) { showPanels(r.panels, r.message); msg.innerHTML = `<span class="warn">${esc(r.message)}</span>`; showTab('tImg'); return; }
+    showPanels(null);
+    const d = r.detect || r;
+    if (!d.ok) { msg.innerHTML = `<span class="err">${esc(r.message || d.error)}</span>`; return; }
+    S.det = { ticks: d.ticks, labels: d.labels, colors: d.colors || [], series: d.series || [], legend_boxes: d.legend_boxes || [], vlm: r.vlm || null, fit: d.fit || null };
+    S.box = d.box;
+    const parts = [];
+    const isBar = r.mode === 'bar' && r.bar?.ok;
+    if (useVlm || xvals || yvals || isBar) S.bar = isBar ? { orient: r.bar.orient, bars: r.bar.bars, series: r.bar.series, legend_src: r.bar.legend_src } : null;
+    if (d.calib) {
+      for (const k of ['x', 'y']) { const c = d.calib[k]; S.calib[k] = { p1: c.p1, p2: c.p2, v1: fmt(c.v1), v2: fmt(c.v2), log: c.log, cat: !!c.cat }; }
+      if (r.message) parts.push(`<div class="ok">✓ ${esc(r.message)}</div>`);
+      const vk = S.calib.y.cat ? 'x' : 'y';
+      parts.push(S.bar ? `<div class="hint">값축(${vk}) ${S.calib[vk].log ? '로그' : '선형'} ${S.calib[vk].v1}…${S.calib[vk].v2} — 화면의 ${vk.toUpperCase()}1·${vk.toUpperCase()}2 위치를 확인하세요. 범주축은 막대 위치만 씁니다.</div>`
+        : `<span class="ok">✓ 보정 제안 — x ${S.calib.x.log ? '로그' : '선형'} ${S.calib.x.v1}…${S.calib.x.v2}, y ${S.calib.y.log ? '로그' : '선형'} ${S.calib.y.v1}…${S.calib.y.v2}. 화면의 X1·X2·Y1·Y2 위치를 확인하세요.</span>`);
+    } else parts.push(`<div class="${useVlm || xvals || yvals ? 'warn' : 'hint'}">${esc(r.message || '눈금 값을 짝짓지 못했습니다 — 아래 수동 보정이나 눈금 값 직접 입력을 쓰세요.')}</div>`);
+    if (r.error) parts.push(`<div class="warn">${esc(r.error)}</div>`);
+    for (const w of d.warn || []) parts.push(`<div class="warn">⚠ ${esc(w)}</div>`);
+    if (r.vlm) { const v = r.vlm; parts.push(`<details><summary>AI 가 읽은 것</summary><div class="hint">x: ${esc(v.x_label)} [${v.x_ticks.join(', ')}] ${v.x_log ? '로그' : ''}<br>y: ${esc(v.y_label)} [${v.y_ticks.join(', ')}] ${v.y_log ? '로그' : ''}<br>범례: ${esc(v.legend.map(l => `${l.name}(${l.color})`).join(', ') || '없음')}</div><pre>${esc(v.raw)}</pre></details>`);
+      if (v.x_ticks.length) $('xvals').value = v.x_ticks.join(', '); if (v.y_ticks.length) $('yvals').value = v.y_ticks.join(', ');
+      if (!S.name && v.title) S.name = v.title; }
+    msg.innerHTML = parts.join('');
+    showPairs(d.fit);
+    if (S.bar) { syncBar(); showTab('tOut'); }
+    else if (S.det.series.length && r.vlm && !S.series.some(s => s.px.length)) useSuggested();
+  } catch (e) { msg.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+  finally { $('autoBtn').disabled = false; syncAll(); persist(); }
+}
+
+// ── 여러 그래프 고르기 ───────────────────────────────────────────────
+function showPanels(panels, msg) {
+  S.panels = panels || null; $('panelBox').hidden = !(panels && panels.length); if ($('panelBox').hidden || !IMG) return;
+  if (msg !== undefined) $('panelMsg').textContent = msg;
+  const box = $('panels'); box.innerHTML = '';
+  panels.forEach((p, i) => {
+    const [x0, y0, x1, y1] = p.crop, w = x1 - x0, h = y1 - y0, k = Math.min(1, 200 / Math.max(w, h));
+    const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w * k)); c.height = Math.max(1, Math.round(h * k));
+    c.getContext('2d').drawImage(IMG, x0, y0, w, h, 0, 0, c.width, c.height);
+    const d = document.createElement('div'); d.className = p.kind === 'plot' ? '' : 'off'; d.title = p.why || '그래프';
+    const t = document.createElement('span'); t.textContent = `${i + 1}. ${p.kind === 'plot' ? '그래프' : p.kind === 'image' ? '지도·사진?' : '그래프 아님?'}`;
+    d.append(c, t); d.onclick = () => choosePanel(p); box.appendChild(d);
+  });
+}
+async function choosePanel(p) {
+  try {
+    prevImg = { ...S.img }; const name = S.name;
+    const info = await api('crop', { id: S.img.id, box: p.crop, plot: p.box }); S = blank(); S.name = name; await setImage(info, false);
+    $('undoCrop').hidden = false; showTab('tCal'); await autoCal(!!(META.models || []).length);
+  } catch (e) { $('panelMsg').textContent = e.message; }
+}
+
+// ── 막대 ────────────────────────────────────────────────────────────
+function barVal(b, p) { return S.bar.orient === 'h' ? toData(p, b.c)[0] : toData(b.c, p)[1]; }
+function barRows() {
+  const B = S.bar, used = [...new Set(B.bars.flatMap(b => b.series))].sort((a, b) => a - b);
+  const rows = B.bars.map(b => {
+    const tops = b.ends.map(p => barVal(b, p)), seg = {}; let prev = 0;
+    b.series.forEach((j, k) => { seg[j] = (seg[j] || 0) + tops[k] - prev; prev = tops[k]; });
+    const top = tops[tops.length - 1]; let ep = '', em = '';
+    if (b.err) { const hi = barVal(b, b.err[0]), lo = b.err[1] != null ? barVal(b, b.err[1]) : 2 * top - hi; ep = hi - top; em = top - lo; }
+    return [b.cat, ...used.map(j => seg[j] ?? ''), top, ep, em];
+  });
+  return { head: ['범주', ...used.map(j => B.series[j]?.name || `계열 ${j + 1}`), '막대 끝(합계)', '오차 +', '오차 −'], rows };
+}
+function syncBar() {
+  const on = !!S.bar; $('barBox').hidden = !on; $('serBox').hidden = on; $('serEd').hidden = on;
+  if (!on) return;
+  const B = S.bar, ne = B.bars.filter(b => b.err).length;
+  $('barInfo').textContent = `${B.orient === 'h' ? '가로' : '세로'} 막대 ${B.bars.length}개, 조각 ${B.bars.reduce((n, b) => n + b.ends.length, 0)}개, 오차 막대 ${ne}개` + (B.legend_src === 'parent' ? ' · 범례는 자르기 전 원본에서 찾음' : '');
+  $('barSer').innerHTML = B.series.map((s, i) => `<div class="bl"><span class="sw" style="background:${s.kind === 'empty' ? '#fff' : s.color};border-color:${s.color};${s.kind === 'hatch' ? `background-image:repeating-linear-gradient(45deg,${s.color} 0 2px,#fff 2px 5px)` : ''}"></span><input type="text" data-s="${i}" value="${esc(s.name)}"><span class="k">${s.legend ? '범례' : ''}</span></div>`).join('');
+  $('barCats').innerHTML = B.bars.map((b, i) => `<div class="bl"><span class="k">${i + 1}</span><input type="text" data-c="${i}" value="${esc(b.cat)}"></div>`).join('');
+  $('barSer').querySelectorAll('input').forEach(el => el.oninput = () => { B.series[+el.dataset.s].name = el.value; syncTable(); drawRecon(); persist(); });
+  $('barCats').querySelectorAll('input').forEach(el => el.oninput = () => { B.bars[+el.dataset.c].cat = el.value; syncTable(); drawRecon(); persist(); });
+  document.querySelector('[data-tab=tSer]').classList.add('done');
+}
+$('barOff').onclick = () => { if (!confirm('막대 결과를 지우고 선·점 방식으로 바꿀까요? (보정은 남습니다)')) return; S.bar = null; $('chart').value = 'xy'; syncBar(); syncAll(); persist(); };
+function hitBar(sx, sy) {
+  if (!S.bar) return null; let best = null;
+  S.bar.bars.forEach((b, i) => {
+    const pts = b.ends.map((p, k) => [p, k]); if (b.err) b.err.forEach((p, k) => { if (p != null) pts.push([p, 'e' + k]); });
+    for (const [p, k] of pts) { const [x, y] = S.bar.orient === 'h' ? i2s(p, b.c) : i2s(b.c, p), d = Math.hypot(x - sx, y - sy); if (d < 9 && (!best || d < best.d)) best = { i, k, d }; }
+  });
+  return best;
+}
+function showPairs(fit) {
+  if (!fit) { $('pairs').innerHTML = ''; return; }
+  const row = k => { const f = fit[k]; return `<tr><td class="l">${k}</td><td class="l">${f.pairs.map(p => fmt(p[0])).join(', ')}</td><td>${f.n}</td><td>${f.resid_px.toFixed(2)}</td></tr>`; };
+  $('pairs').innerHTML = `<table style="margin-top:6px"><tr><th class="l">축</th><th class="l">짝지은 눈금 값</th><th>개수</th><th>잔차(px)</th></tr>${row('x')}${row('y')}</table><div class="hint">잔차가 1px 안팎이면 눈금 값·위치가 서로 잘 맞는다는 뜻입니다.</div>`;
+}
+$('autoBtn').onclick = () => autoCal(true);
+$('fitBtn').onclick = () => {
+  const xs = $('xvals').value.split(/[,\s]+/).filter(Boolean), ys = $('yvals').value.split(/[,\s]+/).filter(Boolean);
+  if (xs.length < 2 || ys.length < 2) { $('autoMsg').innerHTML = '<span class="err">x·y 눈금 값을 2개 이상씩 넣으세요</span>'; return; }
+  autoCal(false, xs, ys);
+};
+document.querySelectorAll('.cpb').forEach(b => b.onclick = () => { calTarget = b.dataset.cp; setTool('cal'); status(`${calTarget.toUpperCase()} 위치를 클릭하세요 (축 위의 눈금)`); });
+for (const [k, i] of [['x', 1], ['x', 2], ['y', 1], ['y', 2]]) $(`${k}v${i}`).oninput = e => { S.calib[k]['v' + i] = e.target.value; calChanged(); };
+$('xlog').onchange = e => { S.calib.x.log = e.target.checked; calChanged(); };
+$('ylog').onchange = e => { S.calib.y.log = e.target.checked; calChanged(); };
+function calChanged() { syncCal(); draw(); drawRecon(); syncTable(); persist(); }
+function syncCal() {
+  for (const k of ['x', 'y']) for (const i of [1, 2]) { const a = S.calib[k], p = a['p' + i];
+    if (document.activeElement !== $(`${k}v${i}`)) $(`${k}v${i}`).value = a['v' + i] ?? '';
+    $(`${k}p${i}`).textContent = p ? `(${p[0].toFixed(1)}, ${p[1].toFixed(1)}) px` : '—'; }
+  $('xlog').checked = !!S.calib.x.log; $('ylog').checked = !!S.calib.y.log;
+  const ok = calOK();
+  $('calMsg').innerHTML = ok ? '<span class="ok">✓ 보정 완료 — 커서를 올리면 아래에 데이터 좌표가 나옵니다</span>' : '네 점과 값을 모두 넣으면 보정됩니다. 로그축 값은 0보다 커야 합니다.';
+  document.querySelector('[data-tab=tCal]').classList.toggle('done', ok);
+  $('boxInfo').textContent = S.box ? `x ${S.box.x0.toFixed(0)}–${S.box.x1.toFixed(0)}, y ${S.box.y0.toFixed(0)}–${S.box.y1.toFixed(0)} px` : '없음 — 자동 보정 또는 직접 그리기';
+}
+
+// ── 계열 ────────────────────────────────────────────────────────────
+function useSuggested() {
+  const sug = S.det?.series || []; if (!sug.length) return;
+  S.series = sug.filter(s => s.color).map((s, i) => { const o = newSeries(i, s.name, s.color); if (/marker|point|scatter|점/i.test(s.style || '')) o.mode = 'points'; return o; });
+  S.cur = 0; syncSer(); persist();
+}
+$('aiSer').onclick = () => { if (S.series.some(s => s.px.length) && !confirm('지금 계열을 지우고 제안으로 바꿀까요?')) return; useSuggested(); };
+$('addSer').onclick = () => { S.series.push(newSeries(S.series.length)); S.cur = S.series.length - 1; syncSer(); persist(); };
+function syncSer() {
+  if (!S.series.length) S.series.push(newSeries(0));
+  S.cur = Math.min(S.cur, S.series.length - 1);
+  $('serList').innerHTML = S.series.map((s, i) => `<div class="ser ${i === S.cur ? 'on' : ''}" data-i="${i}"><span class="sw" style="background:${s.color}"></span><span>${esc(s.name)}</span><span class="n">${s.px.length}점 · ${s.mode === 'line' ? '곡선' : s.mode === 'points' ? '점' : '수동'}</span><button class="x" data-del="${i}" title="계열 지우기">✕</button></div>`).join('');
+  $('serList').querySelectorAll('.ser').forEach(d => d.onclick = e => { if (e.target.dataset.del) return; S.cur = +d.dataset.i; maskImg = null; syncSer(); draw(); });
+  $('serList').querySelectorAll('[data-del]').forEach(b => b.onclick = () => { if (S.series[+b.dataset.del].px.length && !confirm('이 계열을 지울까요?')) return; S.series.splice(+b.dataset.del, 1); syncSer(); draw(); persist(); });
+  const sug = S.det?.colors || [];
+  $('colorChips').innerHTML = sug.length ? '<span class="hint">그림에서 찾은 색:</span>' + sug.map(c => `<button data-c="${c.color}" title="${c.count}픽셀"><span class="sw" style="background:${c.color}"></span>${c.color}</button>`).join('') : '';
+  $('colorChips').querySelectorAll('button').forEach(b => b.onclick = () => { cs().color = b.dataset.c; syncSer(); persist(); if (calOK() && cs().mode !== 'manual') run(); });
+  $('aiSer').hidden = !(S.det?.series || []).length;
+  const s = cs();
+  $('sName').value = s.name; $('sColor').value = s.color; $('sMode').value = s.mode; $('sTol').value = s.tol; $('tolV').textContent = s.tol;
+  $('sHow').value = s.how; $('sN').value = s.n; $('sStep').value = s.step; $('sMin').value = s.min_area; $('sLines').checked = s.remove_lines; $('sLegend').checked = s.skip_legend;
+  $('autoOpts').hidden = s.mode === 'manual'; $('lineOpts').hidden = s.mode !== 'line'; $('ptOpts').hidden = s.mode !== 'points';
+  $('sN').hidden = s.how !== 'n'; $('sStep').hidden = s.how !== 'step';
+  $('howHint').textContent = { n: `x 범위를 ${S.calib.x.log ? '로그 간격으로 ' : ''}고르게 나눈 점 (보간)`, step: S.calib.x.log ? '로그축: log10 간격 (예: 0.1 = 10^0.1배씩)' : 'x 값을 이 간격의 배수에서 (보간)', all: '그림 픽셀 열마다 한 점 (보간 없음)' }[s.how];
+  $('serMsg').innerHTML = (s.warn || []).map(w => `<div class="warn">⚠ ${esc(w)}</div>`).join('');
+  document.querySelector('[data-tab=tSer]').classList.toggle('done', S.series.some(s => s.px.length));
+  syncTable(); drawRecon();
+}
+$('sName').oninput = e => { cs().name = e.target.value; syncSerLight(); };
+function syncSerLight() { const d = $('serList').children[S.cur]; if (d) d.children[1].textContent = cs().name; persist(); syncTable(); drawRecon(); }
+$('sColor').oninput = e => { cs().color = e.target.value; syncSer(); draw(); persist(); };
+$('sMode').onchange = e => { cs().mode = e.target.value; syncSer(); persist(); };
+$('sTol').oninput = e => { cs().tol = +e.target.value; $('tolV').textContent = e.target.value; };
+$('sTol').onchange = () => { persist(); if (cs().px.length && calOK()) run(); };
+$('sHow').onchange = e => { cs().how = e.target.value; syncSer(); persist(); };
+$('sN').onchange = e => { cs().n = +e.target.value; persist(); };
+$('sStep').onchange = e => { cs().step = e.target.value; persist(); };
+$('sMin').onchange = e => { cs().min_area = +e.target.value; persist(); };
+$('sLines').onchange = e => { cs().remove_lines = e.target.checked; persist(); };
+$('sLegend').onchange = e => { cs().skip_legend = e.target.checked; persist(); };
+$('showMask').onchange = () => draw();
+$('clrBtn').onclick = () => { if (cs().px.length && !confirm('이 계열의 점을 모두 지울까요?')) return; cs().px = []; cs().warn = []; maskImg = null; syncSer(); draw(); persist(); };
+$('runBtn').onclick = () => run();
+async function run() {
+  const s = cs(); if (!S.img) return;
+  if (!calOK()) { $('serMsg').innerHTML = '<div class="err">먼저 축 보정을 끝내세요 (2 축 보정)</div>'; return; }
+  if (!S.box) { $('serMsg').innerHTML = '<div class="err">그림 영역이 없습니다 — 축 보정 탭에서 영역을 그리세요</div>'; return; }
+  if (s.how === 'step' && !(parseNum(s.step) > 0)) { $('serMsg').innerHTML = '<div class="err">x 간격을 넣으세요</div>'; return; }
+  $('serMsg').innerHTML = '<span class="hint">추출 중…</span>'; $('runBtn').disabled = true;
+  try {
+    const body = { id: S.img.id, calib: calJSON(), box: S.box, excludes: S.excludes,
+      series: { color: s.color, tol: s.tol, mode: s.mode, how: s.how, n: s.n, step: parseNum(s.step) || 0, min_area: s.min_area, remove_lines: s.remove_lines, skip_legend: s.skip_legend } };
+    const r = await api('extract', body);
+    // 출력 점(보간 결과 포함)을 픽셀로 되돌려 저장 — 화면에 보이는 점 = 내보내는 점
+    s.px = r.data.map(d => toPix(d[0], d[1])); s.warn = r.warn;
+    if (s.mode === 'points') s.px = r.px;
+    if (!r.data.length) s.warn = [...s.warn, '추출된 점이 없습니다 — 색(스포이트)·허용오차를 바꿔 보세요'];
+    S.det = S.det || {}; S.det.legend_boxes = r.legend_boxes;
+    maskImg = await loadImg(r.mask); maskImg.forSeries = s;
+  } catch (e) { s.warn = [e.message]; }
+  $('runBtn').disabled = false; syncSer(); draw(); persist();
+}
+
+// ── 결과 ────────────────────────────────────────────────────────────
+function tableRows() {
+  const cols = S.series.map(s => ({ name: s.name, d: seriesData(s) })), n = Math.max(0, ...cols.map(c => c.d.length));
+  return { cols, n };
+}
+function syncTable() {
+  if (S.bar && calOK()) {
+    const { head, rows } = barRows();
+    $('tbl').innerHTML = '<table><tr>' + head.map((h, i) => `<th class="${i ? '' : 'l'}">${esc(h)}</th>`).join('') + '</tr>' +
+      rows.map(r => '<tr>' + r.map((v, i) => i ? `<td>${v === '' ? '' : fmt(v)}</td>` : `<td class="l">${esc(v)}</td>`).join('') + '</tr>').join('') + '</table>' +
+      '<div class="hint">쌓인 막대는 계열 칸이 조각 높이, ‘막대 끝’이 합계입니다. 오차는 막대 끝에서 위·아래 끝까지 (아래 끝이 안 보이면 위와 같다고 봄).</div>';
+    document.querySelector('[data-tab=tOut]').classList.add('done'); return;
+  }
+  const { cols, n } = tableRows();
+  if (!n) { $('tbl').innerHTML = '<div class="hint">아직 점이 없습니다.</div>'; document.querySelector('[data-tab=tOut]').classList.remove('done'); return; }
+  let h = '<table><tr><th>#</th>' + cols.map(c => `<th>${esc(c.name)} x</th><th>${esc(c.name)} y</th>`).join('') + '</tr>';
+  for (let i = 0; i < Math.min(n, 300); i++) h += `<tr><td>${i + 1}</td>` + cols.map(c => c.d[i] ? `<td>${fmt(c.d[i][0])}</td><td>${fmt(c.d[i][1])}</td>` : '<td></td><td></td>').join('') + '</tr>';
+  $('tbl').innerHTML = h + '</table>' + (n > 300 ? `<div class="hint">… ${n}행 중 300행만 표시 (내려받기에는 전부)</div>` : '');
+  document.querySelector('[data-tab=tOut]').classList.add('done');
+}
+function exportBody(format) {
+  if (S.bar) return { calib: calJSON(), format, series: S.bar.series.map(s => ({ name: s.name })), bars: S.bar.bars, orient: S.bar.orient,
+    meta: { name: $('pName').value || S.name || 'digitized', image: S.img?.id, mode: '막대' } };
+  return { calib: calJSON(), format, series: S.series.map(s => ({ name: s.name, px: s.px, manual: true })), meta: { name: $('pName').value || S.name || 'digitized', image: S.img?.id, xlabel: S.det?.vlm?.x_label || '', ylabel: S.det?.vlm?.y_label || '' } }; }
+async function download(format) {
+  if (!calOK() || !(S.bar || S.series.some(s => s.px.length))) { $('outMsg').innerHTML = '<span class="err">보정과 추출을 먼저 하세요</span>'; return; }
+  try {
+    const r = await api('export', exportBody(format)), blob = await r.blob();
+    const name = decodeURIComponent((r.headers.get('content-disposition') || '').split("''")[1] || 'digitized.' + format);
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    await saveProject(true); $('outMsg').innerHTML = `<span class="ok">✓ ${esc(name)} — 이력에도 저장했습니다</span>`;
+  } catch (e) { $('outMsg').innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+$('dlCsv').onclick = () => download('csv');
+$('dlXlsx').onclick = () => download(META.xlsx ? 'xlsx' : 'csv');
+$('copyBtn').onclick = async () => {
+  let lines, n;
+  if (S.bar && calOK()) { const { head, rows } = barRows(); n = rows.length; lines = [head.join('\t'), ...rows.map(r => r.map((v, i) => i && v !== '' ? fmt(v) : v).join('\t'))]; }
+  else { const t_ = tableRows(); n = t_.n; const cols = t_.cols; lines = [cols.flatMap(c => [c.name + ' x', c.name + ' y']).join('\t')];
+    for (let i = 0; i < n; i++) lines.push(cols.flatMap(c => c.d[i] ? [fmt(c.d[i][0]), fmt(c.d[i][1])] : ['', '']).join('\t')); }
+  const t = lines.join('\n');
+  try { await navigator.clipboard.writeText(t); } catch (e) { const ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+  $('outMsg').innerHTML = `<span class="ok">✓ ${n}행 복사 — 엑셀에 붙여넣기 하세요</span>`;
+};
+$('dlOverlay').onclick = () => {
+  if (!IMG) return; const c = document.createElement('canvas'); c.width = IMG.width; c.height = IMG.height; const g = c.getContext('2d');
+  g.drawImage(IMG, 0, 0); drawOverlay(g, 1, 0, 0, true);
+  const a = document.createElement('a'); a.href = c.toDataURL('image/png'); a.download = ($('pName').value || S.name || 'digitized') + '_검증.png'; a.click();
+};
+let saving = null;
+async function saveProject(quiet) {
+  while (saving) await saving.catch(() => {});
+  saving = saveNow(quiet); try { await saving; } finally { saving = null; }
+}
+async function saveNow(quiet) {
+  if (!S.img) return; S.name = $('pName').value || S.name;
+  const r = await api('save', { project: { pid: S.pid, name: S.name, image: S.img, calib: calJSON(), box: S.box, excludes: S.excludes, series: S.series.map(s => ({ ...s, manual: true })), det: S.det, bar: S.bar } });
+  S.pid = r.pid; persist(); if (!quiet) $('outMsg').innerHTML = '<span class="ok">✓ 이력에 저장했습니다</span>';
+}
+$('saveBtn').onclick = () => saveProject(false).catch(e => $('outMsg').innerHTML = `<span class="err">${esc(e.message)}</span>`);
+$('pName').oninput = e => { S.name = e.target.value; persist(); };
+
+function niceTicks(lo, hi, n = 5) {
+  const span = hi - lo; if (!(span > 0)) return [lo]; const step0 = span / n, mag = 10 ** Math.floor(Math.log10(step0)), r = step0 / mag;
+  const step = (r < 1.5 ? 1 : r < 3 ? 2 : r < 7 ? 5 : 10) * mag, out = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-9; v += step) out.push(+v.toPrecision(12)); return out;
+}
+function drawRecon() {
+  const c = $('recon'), dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight; if (!W) return;
+  c.width = W * dpr; c.height = H * dpr; const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
+  if (S.bar && calOK()) return drawReconBar(g, W, H);
+  const all = S.series.map(s => ({ s, d: seriesData(s) })).filter(o => o.d.length);
+  g.fillStyle = '#888'; g.font = '12px sans-serif';
+  if (!all.length) { g.fillText('추출한 점이 여기에 다시 그려집니다', 12, 22); return; }
+  const xl = S.calib.x.log, yl = S.calib.y.log, fx = v => xl ? Math.log10(v) : v, fy = v => yl ? Math.log10(v) : v;
+  // 축 범위 = 보정 영역(원본 그래프 틀)과 같게
+  let X0, X1, Y0, Y1;
+  if (S.box) { const a = toData(S.box.x0, S.box.y1), b = toData(S.box.x1, S.box.y0); [X0, X1, Y0, Y1] = [fx(a[0]), fx(b[0]), fy(a[1]), fy(b[1])]; }
+  else { const xs = all.flatMap(o => o.d.map(p => fx(p[0]))), ys = all.flatMap(o => o.d.map(p => fy(p[1]))); [X0, X1, Y0, Y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)]; }
+  const L = 52, R = 22, T = 10, B = 28, sx = v => L + (fx(v) - X0) / (X1 - X0) * (W - L - R), sy = v => H - B - (fy(v) - Y0) / (Y1 - Y0) * (H - T - B);
+  g.strokeStyle = '#333'; g.lineWidth = 1; g.strokeRect(L, T, W - L - R, H - T - B);
+  g.fillStyle = '#555'; g.textAlign = 'center';
+  const tk = (lo, hi, log) => log ? Array.from({ length: Math.floor(Math.max(lo, hi)) - Math.ceil(Math.min(lo, hi)) + 1 }, (_, i) => 10 ** (Math.ceil(Math.min(lo, hi)) + i)) : niceTicks(Math.min(lo, hi), Math.max(lo, hi));
+  for (const v of tk(X0, X1, xl)) { const x = sx(v); g.fillRect(x, H - B, 1, 4); g.fillText(fmt(v), x, H - B + 15); }
+  g.textAlign = 'right';
+  for (const v of tk(Y0, Y1, yl)) { const y = sy(v); g.fillRect(L - 4, y, 4, 1); g.fillText(fmt(v), L - 6, y + 4); }
+  g.save(); g.beginPath(); g.rect(L, T, W - L - R, H - T - B); g.clip();
+  for (const { s, d } of all) {
+    g.strokeStyle = g.fillStyle = s.color; g.lineWidth = 1.5;
+    if (s.mode === 'line') { g.beginPath(); d.forEach((p, i) => i ? g.lineTo(sx(p[0]), sy(p[1])) : g.moveTo(sx(p[0]), sy(p[1]))); g.stroke(); }
+    for (const p of d) { g.beginPath(); g.arc(sx(p[0]), sy(p[1]), s.mode === 'line' ? 1.8 : 3, 0, 7); g.fill(); }
+  }
+  g.restore();
+}
+
+function drawReconBar(g, W, H) {
+  const B = S.bar, hz = B.orient === 'h', vk = hz ? 'x' : 'y', lg = S.calib[vk].log, f = v => lg ? Math.log10(Math.max(v, 1e-300)) : v;
+  let V0, V1; if (S.box) { const a = toData(S.box.x0, S.box.y1), b = toData(S.box.x1, S.box.y0); [V0, V1] = hz ? [a[0], b[0]] : [a[1], b[1]]; }
+  else { const vs = B.bars.flatMap(b => b.ends.map(p => barVal(b, p))); [V0, V1] = [Math.min(0, ...vs), Math.max(...vs)]; }
+  const L = hz ? 90 : 52, R = 14, T = 10, Bm = hz ? 28 : 40, n = B.bars.length, pw = W - L - R, ph = H - T - Bm;
+  const sv = v => (f(v) - f(V0)) / (f(V1) - f(V0));
+  g.strokeStyle = '#333'; g.lineWidth = 1; g.strokeRect(L, T, pw, ph); g.font = '11px sans-serif'; g.fillStyle = '#555';
+  const tks = lg ? Array.from({ length: Math.floor(f(V1)) - Math.ceil(f(V0)) + 1 }, (_, i) => 10 ** (Math.ceil(f(V0)) + i)) : niceTicks(V0, V1);
+  for (const v of tks) { const t = sv(v); if (t < -1e-9 || t > 1 + 1e-9) continue;
+    if (hz) { const x = L + t * pw; g.fillRect(x, T + ph, 1, 4); g.textAlign = 'center'; g.fillText(fmt(v), x, T + ph + 15); }
+    else { const y = T + ph - t * ph; g.fillRect(L - 4, y, 4, 1); g.textAlign = 'right'; g.fillText(fmt(v), L - 6, y + 4); } }
+  const base = lg ? 0 : sv(0);
+  B.bars.forEach((b, i) => {
+    const c0 = (i + 0.2) / n, c1 = (i + 0.8) / n; let prev = Math.max(0, Math.min(1, base));
+    b.ends.forEach((p, k) => {
+      const t = Math.max(0, Math.min(1, sv(barVal(b, p)))), s = B.series[b.series[k]] || {}, col = s.color || '#888';
+      const [x, y, w, h] = hz ? [L + prev * pw, T + c0 * ph, (t - prev) * pw, (c1 - c0) * ph] : [L + c0 * pw, T + ph - t * ph, (c1 - c0) * pw, (t - prev) * ph];
+      g.globalAlpha = s.kind === 'empty' ? 0 : s.kind === 'hatch' ? 0.55 : 0.9; g.fillStyle = col; g.fillRect(x, y, w, h); g.globalAlpha = 1;
+      g.strokeStyle = s.kind === 'empty' ? col : '#333'; g.strokeRect(x, y, w, h); prev = t;
+    });
+    if (b.err) { const hi = sv(barVal(b, b.err[0])), lo = b.err[1] != null ? sv(barVal(b, b.err[1])) : 2 * prev - hi, m = (c0 + c1) / 2;
+      g.strokeStyle = '#000'; g.beginPath();
+      if (hz) { const yy = T + m * ph; g.moveTo(L + lo * pw, yy); g.lineTo(L + hi * pw, yy); } else { const xx = L + m * pw; g.moveTo(xx, T + ph - lo * ph); g.lineTo(xx, T + ph - hi * ph); }
+      g.stroke(); }
+    g.fillStyle = '#555'; const lab = String(b.cat).slice(0, 14);
+    if (hz) { g.textAlign = 'right'; g.fillText(lab, L - 4, T + (i + 0.5) / n * ph + 4); } else { g.textAlign = 'center'; g.fillText(i + 1, L + (i + 0.5) / n * pw, T + ph + 14); }
+  });
+  if (!hz) { g.textAlign = 'left'; g.fillText('번호 = 범주 순서 (표 참고)', L, H - 6); }
+}
+
+// ── 이력 ────────────────────────────────────────────────────────────
+async function loadHist() {
+  try {
+    const h = await api('history');
+    $('histList').innerHTML = h.length ? h.map(p => `<div class="ser" data-pid="${p.pid}"><img src="api/img/${p.image}.png" style="width:64px;height:44px;object-fit:contain;background:#fff;border:1px solid var(--line);border-radius:3px" alt=""><div style="flex:1;min-width:0"><b>${esc(p.name || '(이름 없음)')}</b><div class="hint">${esc(p.saved?.replace('T', ' ') || '')} · ${p.series.map(s => `${esc(s.name)} ${s.n}점`).join(', ')}</div></div><button class="x" data-del="${p.pid}" title="지우기">✕</button></div>`).join('') : '<div class="hint">저장된 작업이 없습니다.</div>';
+    $('histList').querySelectorAll('[data-pid]').forEach(d => d.onclick = async e => {
+      if (e.target.dataset.del) { if (confirm('이 작업을 이력에서 지울까요?')) { await api('history/delete', { pid: e.target.dataset.del }); loadHist(); } return; }
+      const p = await api('project/' + d.dataset.pid);
+      S = blank(); Object.assign(S, { pid: p.pid, name: p.name, box: p.box, excludes: p.excludes || [], det: p.det || null, cur: 0, bar: p.bar || null,
+        series: (p.series || []).map((s, i) => ({ ...newSeries(i), ...s })) });
+      for (const k of ['x', 'y']) S.calib[k] = { ...p.calib[k], v1: fmt(p.calib[k].v1), v2: fmt(p.calib[k].v2) };
+      await setImage(p.image, false); showTab('tOut');
+    });
+  } catch (e) { $('histList').innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+$('histRefresh').onclick = loadHist;
+
+// ── 캔버스 ──────────────────────────────────────────────────────────
+const cv = $('cv'), ctx = cv.getContext('2d'), lp = $('loupe'), lctx = lp.getContext('2d');
+function resize() { const dpr = window.devicePixelRatio || 1, r = $('wrap').getBoundingClientRect(); cv.width = r.width * dpr; cv.height = r.height * dpr; draw(); drawRecon(); }
+function fit() { if (!IMG) return; const r = $('wrap').getBoundingClientRect(); const z = Math.min((r.width - 20) / IMG.width, (r.height - 20) / IMG.height);
+  view = { z, ox: (r.width - IMG.width * z) / 2, oy: (r.height - IMG.height * z) / 2 }; draw(); }
+function zoomAt(f, sx, sy) { const z = Math.max(0.05, Math.min(40, view.z * f)); view.ox = sx - (sx - view.ox) * z / view.z; view.oy = sy - (sy - view.oy) * z / view.z; view.z = z; draw(); }
+$('zIn').onclick = () => { const r = $('wrap').getBoundingClientRect(); zoomAt(1.5, r.width / 2, r.height / 2); };
+$('zOut').onclick = () => { const r = $('wrap').getBoundingClientRect(); zoomAt(1 / 1.5, r.width / 2, r.height / 2); };
+$('zFit').onclick = fit;
+$('z1').onclick = () => { const r = $('wrap').getBoundingClientRect(); zoomAt(1 / view.z, r.width / 2, r.height / 2); };
+const s2i = (sx, sy) => [(sx - view.ox) / view.z, (sy - view.oy) / view.z];
+const i2s = (x, y) => [x * view.z + view.ox, y * view.z + view.oy];
+function cross(g, x, y, r, col, label) {
+  g.strokeStyle = '#fff'; g.lineWidth = 3; g.beginPath(); g.moveTo(x - r, y); g.lineTo(x + r, y); g.moveTo(x, y - r); g.lineTo(x, y + r); g.stroke();
+  g.strokeStyle = col; g.lineWidth = 1.5; g.stroke();
+  if (label) { g.font = 'bold 12px sans-serif'; g.lineWidth = 3; g.strokeStyle = '#fff'; g.strokeText(label, x + 5, y - 6); g.fillStyle = col; g.fillText(label, x + 5, y - 6); }
+}
+function drawOverlay(g, z, ox, oy, forExport) {
+  const P = (x, y) => [x * z + ox, y * z + oy];
+  if (S.box) { const [a, b] = P(S.box.x0, S.box.y0), [c, d] = P(S.box.x1, S.box.y1); g.setLineDash([5, 4]); g.strokeStyle = '#00a3c4'; g.lineWidth = 1; g.strokeRect(a, b, c - a, d - b); g.setLineDash([]); }
+  if (!forExport) {
+    for (const lb of (S.det?.legend_boxes || [])) { if (!cs()?.skip_legend) break; const [a, b] = P(lb[0], lb[1]), [c, d] = P(lb[2], lb[3]); g.fillStyle = 'rgba(120,120,120,.15)'; g.fillRect(a, b, c - a, d - b); g.fillStyle = '#777'; g.font = '11px sans-serif'; g.fillText('범례(제외)', a + 2, b + 11); }
+    for (const e of S.excludes) { const [a, b] = P(Math.min(e[0], e[2]), Math.min(e[1], e[3])), [c, d] = P(Math.max(e[0], e[2]), Math.max(e[1], e[3])); g.fillStyle = 'rgba(220,40,40,.15)'; g.fillRect(a, b, c - a, d - b); g.strokeStyle = 'rgba(220,40,40,.7)'; g.strokeRect(a, b, c - a, d - b); }
+    if ($('vTicks').checked && S.det?.ticks && S.box) {
+      g.fillStyle = '#ff8c00'; const t = S.det.ticks;
+      for (const x of t.x) { const [a, b] = P(x, S.box.y1); g.fillRect(a - 0.5, b + 2, 1.5, 7); }
+      for (const y of t.y) { const [a, b] = P(S.box.x0, y); g.fillRect(a - 9, b - 0.5, 7, 1.5); }
+    }
+    if ($('showMask').checked && maskImg && maskImg.forSeries === cs()) { g.imageSmoothingEnabled = false; g.drawImage(maskImg, ox, oy, IMG.width * z, IMG.height * z); }
+  }
+  if ($('vPts').checked || forExport) for (let si = 0; si < S.series.length; si++) {
+    const s = S.series[si], on = si === S.cur, r = forExport ? 2.5 : (on ? 3.5 : 2.5);
+    if (s.mode === 'line' && s.px.length > 1) { g.strokeStyle = s.color; g.globalAlpha = .5; g.lineWidth = 1; g.beginPath(); const srt = [...s.px].sort((a, b) => a[0] - b[0]);
+      srt.forEach((p, i) => { const [x, y] = P(p[0], p[1]); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.stroke(); g.globalAlpha = 1; }
+    for (const p of s.px) { const [x, y] = P(p[0], p[1]); g.beginPath(); g.arc(x, y, r, 0, 7); g.fillStyle = s.color; g.fill(); g.lineWidth = 1; g.strokeStyle = on && !forExport ? '#000' : '#fff'; g.stroke(); }
+  }
+  if (S.bar && ($('vPts').checked || forExport)) {
+    const B = S.bar, hz = B.orient === 'h', Q = (p, c) => hz ? P(p, c) : P(c, p); g.font = 'bold 12px sans-serif';
+    B.bars.forEach((b, i) => {
+      let prev = b.base;
+      b.ends.forEach((p, k) => {
+        const col = B.series[b.series[k]]?.color || '#f0c', [a1, a2] = hz ? P(Math.min(prev, p), b.w[0]) : P(b.w[0], Math.min(prev, p)), [b1, b2] = hz ? P(Math.max(prev, p), b.w[1]) : P(b.w[1], Math.max(prev, p));
+        g.setLineDash([4, 3]); g.lineWidth = 1.2; g.strokeStyle = '#e600b8'; g.strokeRect(a1, a2, b1 - a1, b2 - a2); g.setLineDash([]);
+        const [hx, hy] = Q(p, b.c); g.beginPath(); g.moveTo(hx, hy - 6); g.lineTo(hx + 6, hy); g.lineTo(hx, hy + 6); g.lineTo(hx - 6, hy); g.closePath();
+        g.fillStyle = col; g.fill(); g.lineWidth = 1.5; g.strokeStyle = '#fff'; g.stroke(); prev = p;
+      });
+      if (b.err) b.err.forEach(p => { if (p != null) { const [hx, hy] = Q(p, b.c); cross(g, hx, hy, 6, '#0091ea'); } });
+      const [lx, ly] = Q(b.ends[b.ends.length - 1], b.c), t = String(i + 1);
+      g.lineWidth = 3; g.strokeStyle = '#fff'; g.strokeText(t, lx + (hz ? 8 : -4), ly + (hz ? 4 : -9)); g.fillStyle = '#e600b8'; g.fillText(t, lx + (hz ? 8 : -4), ly + (hz ? 4 : -9));
+    });
+  }
+  for (const k of ['x', 'y']) for (const i of [1, 2]) { const p = S.calib[k]['p' + i]; if (!p || S.calib[k].cat) continue; const [x, y] = P(p[0], p[1]);
+    cross(g, x, y, 9, k === 'x' ? '#1f5fa8' : '#2e7d32', `${k.toUpperCase()}${i}${S.calib[k]['v' + i] !== '' ? '=' + S.calib[k]['v' + i] : ''}`); }
+  if (!forExport && drag?.rect) { const r = drag.rect, [a, b] = P(Math.min(r[0], r[2]), Math.min(r[1], r[3])), [c, d] = P(Math.max(r[0], r[2]), Math.max(r[1], r[3]));
+    g.setLineDash([4, 3]); g.strokeStyle = tool === 'exclude' ? '#d32f2f' : tool === 'crop' ? '#7b1fa2' : '#00a3c4'; g.lineWidth = 1.5; g.strokeRect(a, b, c - a, d - b); g.setLineDash([]); }
+}
+function draw() {
+  const dpr = window.devicePixelRatio || 1; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cv.width, cv.height); if (!IMG) return;
+  ctx.imageSmoothingEnabled = view.z < 2; ctx.drawImage(IMG, view.ox, view.oy, IMG.width * view.z, IMG.height * view.z);
+  drawOverlay(ctx, view.z, view.ox, view.oy, false);
+  drawLoupe();
+}
+function drawLoupe() {
+  lp.style.display = $('vLoupe').checked && mouse && IMG ? '' : 'none'; if (lp.style.display) return;
+  const [x, y] = mouse.img, Z = 8, W = 150, half = W / 2 / Z;
+  lctx.imageSmoothingEnabled = false; lctx.fillStyle = '#fff'; lctx.fillRect(0, 0, W, W);
+  lctx.drawImage(IMG, x - half, y - half, half * 2, half * 2, 0, 0, W, W);
+  lctx.save(); lctx.translate(W / 2 - x * Z, W / 2 - y * Z); drawOverlay(lctx, Z, 0, 0, false); lctx.restore();
+  lctx.strokeStyle = 'rgba(255,0,0,.8)'; lctx.lineWidth = 1; lctx.beginPath(); lctx.moveTo(W / 2, 0); lctx.lineTo(W / 2, W); lctx.moveTo(0, W / 2); lctx.lineTo(W, W / 2); lctx.stroke();
+}
+function status(t) { $('status').textContent = t || ' '; }
+function setTool(t) { tool = t; document.querySelectorAll('.toolb').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
+  document.querySelectorAll('.cpb').forEach(b => b.classList.toggle('on', t === 'cal' && b.dataset.cp === calTarget));
+  cv.style.cursor = t === 'pan' ? 'grab' : 'crosshair'; draw(); }
+document.querySelectorAll('.toolb').forEach(b => b.onclick = () => setTool(tool === b.dataset.tool ? 'pan' : b.dataset.tool));
+function hitPoint(sx, sy) {
+  for (const k of ['x', 'y']) for (const i of [1, 2]) { const p = S.calib[k]['p' + i]; if (!p) continue; const [x, y] = i2s(p[0], p[1]); if (Math.hypot(x - sx, y - sy) < 9) return { cal: k + i }; }
+  const s = cs(); if (!s) return null; let best = null;
+  s.px.forEach((p, j) => { const [x, y] = i2s(p[0], p[1]), d = Math.hypot(x - sx, y - sy); if (d < 7 && (!best || d < best.d)) best = { j, d }; });
+  return best ? { pt: best.j } : null;
+}
+function pickColor(ix, iy) {
+  const x0 = Math.floor(ix), y0 = Math.floor(iy); let best = null;
+  for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const x = x0 + dx, y = y0 + dy; if (x < 0 || y < 0 || x >= PIX.width || y >= PIX.height) continue;
+    const o = (y * PIX.width + x) * 4, c = [PIX.data[o], PIX.data[o + 1], PIX.data[o + 2]], d = Math.hypot(255 - c[0], 255 - c[1], 255 - c[2]);
+    if (!best || d > best.d) best = { c, d }; }  // 흰 바탕에서 가장 먼 (번지지 않은) 픽셀
+  return best ? '#' + best.c.map(v => v.toString(16).padStart(2, '0')).join('') : null;
+}
+cv.addEventListener('contextmenu', e => e.preventDefault());
+cv.addEventListener('wheel', e => { e.preventDefault(); const r = cv.getBoundingClientRect(); zoomAt(e.deltaY < 0 ? 1.2 : 1 / 1.2, e.clientX - r.left, e.clientY - r.top); }, { passive: false });
+cv.addEventListener('pointerdown', e => {
+  if (!IMG) return; const r = cv.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top, [ix, iy] = s2i(sx, sy);
+  cv.setPointerCapture(e.pointerId);
+  if (e.button === 1 || tool === 'pan' && !hitPoint(sx, sy)) { drag = { pan: true, sx, sy, ox: view.ox, oy: view.oy }; cv.style.cursor = 'grabbing'; return; }
+  const h = hitPoint(sx, sy);
+  if (h?.cal && tool !== 'cal') { drag = { cal: h.cal }; return; }
+  if (tool === 'cal') { const k = calTarget[0], i = calTarget[1]; S.calib[k]['p' + i] = [ix, iy];
+    const order = ['x1', 'x2', 'y1', 'y2'], nx = order[order.indexOf(calTarget) + 1];
+    $(`${k}v${i}`).focus(); $(`${k}v${i}`).select();
+    if (nx && !S.calib[nx[0]]['p' + nx[1]]) { calTarget = nx; status(`${nx.toUpperCase()} 위치를 클릭하세요`); setTool('cal'); } else { setTool('pan'); status(''); }
+    calChanged(); return; }
+  if (tool === 'baredit') { const hb = hitBar(sx, sy); if (hb) drag = { bar: hb }; else { drag = { pan: true, sx, sy, ox: view.ox, oy: view.oy }; } return; }
+  if (tool === 'pick') { const c = pickColor(ix, iy); if (c) { cs().color = c; syncSer(); persist(); setTool('pan'); if (calOK() && cs().mode !== 'manual') run(); } return; }
+  if (tool === 'edit') {
+    if (h?.pt !== undefined) { if (e.shiftKey || e.button === 2) { cs().px.splice(h.pt, 1); syncSer(); draw(); persist(); } else drag = { pt: h.pt }; return; }
+    if (e.button === 0 && !e.shiftKey) { cs().px.push([ix, iy]); drag = { pt: cs().px.length - 1 }; syncSer(); draw(); persist(); }
+    return;
+  }
+  if (tool === 'exclude') { const j = S.excludes.findIndex(q => ix >= Math.min(q[0], q[2]) && ix <= Math.max(q[0], q[2]) && iy >= Math.min(q[1], q[3]) && iy <= Math.max(q[1], q[3]));
+    if (j >= 0) { S.excludes.splice(j, 1); draw(); persist(); return; } }
+  if (['box', 'exclude', 'crop'].includes(tool)) drag = { rect: [ix, iy, ix, iy] };
+});
+cv.addEventListener('pointermove', e => {
+  const r = cv.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top, [ix, iy] = s2i(sx, sy);
+  mouse = IMG && ix >= 0 && iy >= 0 && ix < IMG.width && iy < IMG.height ? { img: [ix, iy] } : null;
+  if (drag?.pan) { view.ox = drag.ox + sx - drag.sx; view.oy = drag.oy + sy - drag.sy; }
+  else if (drag?.cal) { S.calib[drag.cal[0]]['p' + drag.cal[1]] = [ix, iy]; syncCal(); }
+  else if (drag?.pt !== undefined) { cs().px[drag.pt] = [ix, iy]; }
+  else if (drag?.bar) { const b = S.bar.bars[drag.bar.i], v = S.bar.orient === 'h' ? ix : iy, k = drag.bar.k;
+    if (typeof k === 'number') b.ends[k] = v; else b.err[+k[1]] = v; syncTable(); }
+  else if (drag?.rect) { drag.rect[2] = ix; drag.rect[3] = iy; }
+  if (IMG && mouse) { let t = `픽셀 (${ix.toFixed(1)}, ${iy.toFixed(1)})`; if (calOK()) { const [x, y] = toData(ix, iy); t += `  →  x = ${fmt(x)},  y = ${fmt(y)}`; }
+    const o = (Math.floor(iy) * PIX.width + Math.floor(ix)) * 4; t += `   색 #${[0, 1, 2].map(i => PIX.data[o + i].toString(16).padStart(2, '0')).join('')}`; status(t); }
+  draw();
+});
+cv.addEventListener('pointerup', async e => {
+  const d = drag; drag = null; if (!d) return;
+  if (d.pan) { cv.style.cursor = tool === 'pan' ? 'grab' : 'crosshair'; return; }
+  if (d.cal) { calChanged(); return; }
+  if (d.pt !== undefined) { syncSer(); persist(); draw(); return; }
+  if (d.bar) { syncTable(); drawRecon(); persist(); draw(); return; }
+  if (d.rect) { const q = d.rect, rr = [Math.max(0, Math.min(q[0], q[2])), Math.max(0, Math.min(q[1], q[3])), Math.min(IMG.width, Math.max(q[0], q[2])), Math.min(IMG.height, Math.max(q[1], q[3]))];
+    if (rr[2] - rr[0] < 4 || rr[3] - rr[1] < 4) { draw(); return; }
+    if (tool === 'box') { S.box = { x0: rr[0], y0: rr[1], x1: rr[2], y1: rr[3] }; setTool('pan'); syncCal(); }
+    else if (tool === 'exclude') S.excludes.push(rr);
+    else if (tool === 'crop') await doCrop(rr);
+    persist(); draw(); }
+});
+cv.addEventListener('pointerleave', () => { mouse = null; draw(); });
+document.addEventListener('keydown', e => {
+  if (/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) return;
+  if (e.key === 'Escape') { setTool('pan'); status(''); }
+  if ((e.key === 'Delete' || e.key === 'Backspace') && mouse && tool === 'edit') { const [sx, sy] = i2s(...mouse.img), h = hitPoint(sx, sy); if (h?.pt !== undefined) { cs().px.splice(h.pt, 1); syncSer(); draw(); persist(); } }
+});
+
+// ── 탭·시작 ─────────────────────────────────────────────────────────
+function showTab(id) { document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === id)); document.querySelectorAll('.pane').forEach(p => p.hidden = p.id !== id);
+  if (id === 'tOut') { $('pName').value = S.name || ''; drawRecon(); syncTable(); } if (id === 'tHist') loadHist(); }
+document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => showTab(b.dataset.tab));
+$('theme').onclick = () => { document.body.classList.toggle('dark'); store.set('digitizer-dark', document.body.classList.contains('dark')); };
+['vPts', 'vTicks', 'vLoupe'].forEach(id => $(id).onchange = () => draw());
+function syncAll() { syncCal(); syncSer(); syncBar(); draw(); }
+window.addEventListener('resize', resize);
+(async () => {
+  if (store.get('digitizer-dark')) document.body.classList.add('dark');
+  resize();
+  try { META = await api('meta'); } catch (e) { META = {}; }
+  const ms = META.models || []; $('model').innerHTML = (ms.length ? ms : [META.model || '']).map(m => `<option ${m === META.model ? 'selected' : ''}>${esc(m)}</option>`).join('');
+  if (!ms.length) $('model').title = 'LLM 서버 없음 — AI 자동 보정은 안 되고, 눈금 값 직접 입력·수동 보정은 됩니다';
+  if (!META.xlsx) $('dlXlsx').title = 'openpyxl 이 없어 CSV 로 받습니다';
+  const saved = store.get('digitizer-state');
+  if (saved?.img) { try { S = Object.assign(blank(), saved); S.series = (S.series || []).map((s, i) => ({ ...newSeries(i), ...s })); await setImage(S.img, false); } catch (e) { S = blank(); } }
+  syncAll();
+})();
+</script>
+</body>
+</html>

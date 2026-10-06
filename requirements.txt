@@ -1,0 +1,3 @@
+numpy>=1.21
+pillow>=9.2
+openpyxl>=3.0  # 선택: 엑셀(XLSX) 내보내기. 없으면 CSV

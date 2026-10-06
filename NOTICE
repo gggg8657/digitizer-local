@@ -1,0 +1,24 @@
+digitizer-local
+===============
+
+Original work (MIT). 제3자 코드·글꼴·데이터를 동봉하지 않습니다.
+WebPlotDigitizer(Ankit Rohatgi, AGPL-3.0)의 사용 흐름(축 두 점씩 보정 → 색으로 계열 추출 → 수동 보정)을 참고했을 뿐,
+코드는 가져오지 않았습니다. 축·눈금·글자 검출, 색 마스크·열 중심 추적, 범례 상자 검출은 이 패키지에서 새로 작성했습니다.
+
+pip 의존성 (동봉 안 함):
+  numpy — BSD-3-Clause
+  Pillow — HPND License
+  openpyxl (선택, 엑셀 내보내기) — MIT
+  matplotlib (선택, selftest 의 '논문 같은' 합성 그래프) — PSF 기반 matplotlib License
+  scipy (선택, 있으면 산점 연결 성분 계산을 빠르게) — BSD-3-Clause
+외부 프로그램 (선택): poppler-utils 의 pdftoppm/pdfinfo (GPL-2.0, 별도 실행만 함) 또는 PyMuPDF — PDF 쪽을 그림으로
+
+시험용 그림은 synth.py 로 만든 합성 그래프만 씁니다. 논문 그림·사용자가 올린 그림은 저장소에 넣지 않습니다.
+
+Files authored for this package (MIT): app.py, digitize.py, bars.py, synth.py, ui.html, selftest.py, setup.sh, README.md
+
+LLM (not bundled): called via an OpenAI-compatible API; default deployment is Ollama (https://github.com/ollama/ollama, MIT)
+  serving Google Gemma (gemma4:31b, https://ai.google.dev/gemma — see Gemma's terms of use).
+
+This package: Copyright (c) 2026 gggg8657 <dongjukim.dev@gmail.com>
+화면 하단·메타데이터의 저작자 표기는 지우거나 바꾸지 마세요.
