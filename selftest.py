@@ -9,7 +9,7 @@ TMP = tempfile.mkdtemp(prefix="digitizer-selftest-")
 os.environ["WORKSPACE"] = TMP
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np  # noqa: E402
-import app, digitize as D, synth as S  # noqa: E401,E402
+import app, bars as B, digitize as D, synth as S  # noqa: E401,E402
 
 OUT = os.environ.get("SELFTEST_OUT")
 ROWS = []
@@ -366,8 +366,8 @@ try:
         assert [b["cat"] for b in bb["bars"]] == ["EV Conv.", "EV Cir.", "Phone Conv.", "Phone Cir."], [b["cat"] for b in bb["bars"]]
         assert sorted(s["name"] for s in bb["series"]) == ["S1", "S2", "S3"], bb["series"]
         head, rows, long_ = app.bar_table(bb["calib"], bb["bars"], bb["series"], bb["orient"])
-        assert head[0] == "범주" and head[-3:] == ["막대 끝(합계)", "오차 +", "오차 −"] and len(rows) == 4 and len(long_) == 12
-        assert abs(rows[0][-3] - 77) < 1 and abs(sum(rows[0][1:4]) - rows[0][-3]) < 1e-6, rows[0]
+        assert head == ["범주", "S1", "S2", "S3", "막대 끝(합계)"] and len(rows) == 4 and len(long_) == 12, head
+        assert abs(rows[0][-1] - 77) < 1 and abs(sum(rows[0][1:4]) - rows[0][-1]) < 1e-6, rows[0]
         body, name, _ = app.export(bb["calib"], bb["series"], "csv", {"name": "막대"}, bb["bars"], bb["orient"])
         assert name == "막대.csv" and body.decode("utf-8-sig").splitlines()[1].startswith("EV Conv.,")
         if app._has("openpyxl"):
@@ -410,6 +410,63 @@ try:
         assert c["parent"] == pinfo["id"] and app.image_meta(c["id"])["box"][0] == round(pl[0]["crop"][0])
         r = app.auto(c["id"])
         assert not r["need_panel"] and r["mode"] == "bar" and len(r["bar"]["bars"]) == 4, r["message"]
+        # 칸막이 막대그래프(3칸이 왼쪽 값축 하나를 같이 씀, 위에 범례 틀): 한 그래프로 찾고, 고른 상자로 축을 잡아 6개 막대
+        png, tr = S.boxed_bars()
+        binfo = app.save_image(png)
+        ps = B.find_panels(D.load(png))
+        assert len(ps) == 1 and ps[0]["kind"] == "plot" and ps[0].get("parts") == 3, [(p["kind"], p.get("parts")) for p in ps]
+        c = app.crop_image(binfo["id"], ps[0]["crop"], ps[0]["box"])
+        app.chat_vision = lambda p, i, m=None: (json.dumps({"labels": {}}) if "numbered row" in p or "chart legend" in p else
+                                                json.dumps({"bars": {}}) if "magenta tag" in p else
+                                                json.dumps({"x_ticks": [], "y_ticks": tr["ticks"], "chart_type": "bar", "legend": []}))
+        r = app.auto(c["id"])
+        bb = r["bar"]
+        assert r["mode"] == "bar" and bb["ok"] and len(bb["bars"]) == 6, r["message"]
+        errs = [abs(x - y) / 120 * 100 for b, t in zip(bb["bars"], tr["bars"]) for x, y in zip(app.bar_values(bb["calib"], b, "v")[0], t["tops"])]
+        assert len(errs) == 12 and max(errs) <= 2.0, errs
+        ROWS.append(("막대-칸막이3칸", "2계열", 12, bb["fit"]["y"]["resid_px"], float(np.sqrt(np.mean(np.square(errs)))), max(errs), None))
+        # 이름표가 바로 옆에 붙은 산점: 이름표 붙은 점을 범례 견본으로 빼지 않음
+        png, tr = S.annotated_scatter()
+        res = D.run_series(D.load(png), tr["calib"], tr["box"], dict(color="#e01010", tol=70, mode="points"))
+        assert len(res["data"]) == 10, (len(res["data"]), res["warn"])
+
+    # 10) 보정 뒤 자동 추출 (▶ 추출을 따로 누르지 않음): 선+표식은 표식 위치, 묶음 막대는 범주 × 계열 한 줄
+    if app._has("matplotlib"):
+        png, tr = S.paper_plot("A", 150)
+        info = app.save_image(png)
+
+        def fake_line(prompt, images, model=None):
+            if "numbered row" in prompt:
+                return json.dumps({"labels": {}})
+            return json.dumps({"x_ticks": [200, 400, 600, 800, 1000, 1200, 1400, 1600], "y_ticks": [1, 10], "x_scale": "linear", "y_scale": "log",
+                               "chart_type": "line", "legend": [{"name": "UO2", "color": "blue"}, {"name": "UO2-BeO", "color": "red"}, {"name": "U3Si2", "color": "black"}]})
+        app.chat_vision = fake_line
+        r = app.auto(info["id"])
+        got = {s_["name"]: s_ for s_ in r["detect"]["series"]}
+        assert r["mode"] == "xy" and "자동으로 뽑았습니다" in r["message"], r["message"]
+        for s_ in tr["series"]:
+            g = got[s_["name"]]
+            assert g["kind"] == "line+markers" and len(g["px"]) == 13, (s_["name"], g.get("kind"), len(g["px"]))
+            d = app.series_data(r["detect"]["calib"], g)
+            e = max(abs(math.log10(y) - math.log10(f)) for (x, y), f in zip(d, s_["f"](np.array([p[0] for p in d])))) / math.log10(30) * 100
+            assert e < 1.5, (s_["name"], e)
+        png, tr = S.grouped_bars()
+        info = app.save_image(png)
+
+        def fake_grp(prompt, images, model=None):
+            if "magenta tag" in prompt:
+                return json.dumps({"bars": {str(i + 1): {"category": ["2021", "2022", "2023", "2024"][i // 2], "group": ""} for i in range(8)}})
+            if "chart legend" in prompt:
+                return json.dumps({"labels": {"1": "Plan", "2": "Actual"}})
+            if "numbered row" in prompt:
+                return json.dumps({"labels": {}})
+            return json.dumps({"x_ticks": [], "y_ticks": tr["ticks"], "chart_type": "bar", "legend": []})
+        app.chat_vision = fake_grp
+        r = app.auto(info["id"])
+        bb = r["bar"]
+        head, rows, _ = app.bar_table(bb["calib"], bb["bars"], bb["series"], bb["orient"])
+        assert head == ["범주", "Plan", "Actual"] and [q[0] for q in rows] == ["2021", "2022", "2023", "2024"], (head, rows)
+        assert max(abs(q[1] - tr["rows"][q[0]][0]) + abs(q[2] - tr["rows"][q[0]][1]) for q in rows) < 0.4, rows
 
     # 8) 폐쇄망: 외부 CDN 없음, 저작권 표기
     ui = app.read(os.path.join(app.ROOT, "ui.html"))

@@ -275,3 +275,82 @@ def bar_plot(kind="simple", dpi=110):
     fig.savefig(b, format="png", dpi=dpi)
     plt.close(fig)
     return b.getvalue(), {"orient": orient, "log": log, "ticks": tk, "lim": [float(x) for x in lim], "bars": bars, "n_series": ns}
+
+
+def annotated_scatter(dpi=120):
+    """점마다 바로 오른쪽에 이름표가 붙은 산점(범례는 그래프 밖) — 이름표 붙은 점을 범례 견본으로 오인하지 않는지"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    x = [20, 35, 60, 300, 480, 700, 850, 980, 40, 520]
+    y = [11.2, 9.5, 7.4, 1.7, 0.3, 2.7, 0.4, 1.6, 5.5, 4.0]
+    names = ["Geothermal", "Hydraulic", "Others", "CISO", "NG", "WACM", "Oil", "Coal", "Biological", "Mid"]
+    fig, ax = plt.subplots(figsize=(4.6, 4.2), dpi=dpi)
+    ax.plot(x, y, "o", ms=8, mfc="none", mec="#e01010", mew=1.6, label="Electricity Sources")
+    for xi, yi, n in zip(x, y, names):
+        ax.text(xi + 30, yi, n, va="center", fontsize=9)
+    ax.set_xlim(-100, 1100)
+    ax.set_ylim(-1, 13)
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=True)
+    fig.tight_layout()
+    fig.canvas.draw()
+    H = fig.canvas.get_width_height()[1]
+    T = ax.transData
+
+    def pix(a, b):
+        u, v = T.transform((a, b))
+        return [float(u), float(H - v)]
+    calib = {"x": {"p1": pix(-100, -1), "p2": pix(1100, -1), "v1": -100, "v2": 1100, "log": False},
+             "y": {"p1": pix(-100, -1), "p2": pix(-100, 13), "v1": -1, "v2": 13, "log": False}}
+    bb = ax.get_window_extent()
+    b = io.BytesIO()
+    fig.savefig(b, format="png", dpi=dpi)
+    plt.close(fig)
+    return b.getvalue(), {"calib": calib, "box": {"x0": bb.x0, "y0": H - bb.y1, "x1": bb.x1, "y1": H - bb.y0}, "x": x, "y": y}
+
+
+def boxed_bars(dpi=110):
+    """값축을 같이 쓰는 칸막이 막대그래프 3칸 (왼쪽 칸에만 눈금 글자) + 위에 범례 틀"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, axs = plt.subplots(1, 3, figsize=(7.5, 3.8), dpi=dpi, sharey=True, gridspec_kw={"wspace": 0.03})
+    data = [[(60, 30), (80, 20)], [(70, 30), (50, 50)], [(40, 60), (90, 10)]]
+    bars = []
+    for ax, d, t in zip(axs, data, ["Energy", "CO2", "Water"]):
+        for i, (a1, a2) in enumerate(d):
+            ax.bar(i, a1, 0.5, color="#d62728", edgecolor="black", lw=0.8)
+            ax.bar(i, a2, 0.5, bottom=a1, color="#404040", edgecolor="black", lw=0.8)
+            bars.append({"tops": [a1, a1 + a2], "series": [0, 1], "err": None})
+        ax.set_title(t, y=0.88)
+        ax.set_xticks([0, 1], ["Scrap", "Battery"])
+        ax.set_ylim(0, 120)
+    fig.legend(handles=[plt.Rectangle((0, 0), 1, 1, fc="#d62728", ec="k"), plt.Rectangle((0, 0), 1, 1, fc="#404040", ec="k")],
+               labels=["Electricity", "Alkali"], loc="upper center", ncol=2)
+    fig.subplots_adjust(top=0.84, bottom=0.12, left=0.1, right=0.98)
+    tk = [0.0, 20.0, 40.0, 60.0, 80.0, 100.0, 120.0]
+    b = io.BytesIO()
+    fig.savefig(b, format="png", dpi=dpi)
+    plt.close(fig)
+    return b.getvalue(), {"orient": "v", "log": False, "ticks": tk, "lim": [0.0, 120.0], "bars": bars, "n_series": 2}
+
+
+def grouped_bars(dpi=110):
+    """묶음 막대: 해마다 Plan·Actual 두 막대가 나란히 (범주 글자는 묶음 가운데 하나)"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    plan, act = [12, 15, 9, 20], [8, 11, 14, 6]
+    x = np.arange(4)
+    fig, ax = plt.subplots(figsize=(6.4, 4.2), dpi=dpi)
+    ax.bar(x - 0.175, plan, 0.35, color="#1f77b4", label="Plan")
+    ax.bar(x + 0.175, act, 0.35, color="#ff7f0e", label="Actual")
+    ax.set_xticks(x, ["2021", "2022", "2023", "2024"])
+    ax.set_ylim(0, 21)
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+    b = io.BytesIO()
+    fig.savefig(b, format="png", dpi=dpi)
+    plt.close(fig)
+    return b.getvalue(), {"rows": {"2021": (12, 8), "2022": (15, 11), "2023": (9, 14), "2024": (20, 6)}, "ticks": [0, 2.5, 5, 7.5, 10, 12.5, 15, 17.5, 20]}

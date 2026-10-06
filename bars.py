@@ -61,6 +61,17 @@ def _ink_rows(ink, gap):
 
 
 def find_panels(a, min_frac=0.06):
+    """기본은 선을 그대로 보고, 가장 큰 그래프가 작게 나오면(살짝 기운 스캔에서 축선이 계단처럼 끊김) 번지게 해서 다시 찾는다."""
+    p0 = _find_panels(a, min_frac, False)
+    big = lambda ps: max([(p["box"][2] - p["box"][0]) * (p["box"][3] - p["box"][1]) for p in ps if p["kind"] == "plot"] or [0])  # noqa: E731
+    H, W = a.shape[:2]
+    if big(p0) >= 0.3 * H * W:
+        return p0
+    p1 = _find_panels(a, min_frac, True)
+    return p1 if big(p1) > 1.5 * big(p0) else p0
+
+
+def _find_panels(a, min_frac=0.06, tilt=False):
     """축 상자 후보 → [{box: [x0,y0,x1,y1] (축선 안쪽 그림 영역), crop: 눈금 글자·축 이름까지 넣은 자르기 범위,
     kind: 'plot' | 'image'(지도·사진처럼 안이 빽빽함), score}]. 큰 것부터 위→아래·왼→오른 순."""
     H, W = a.shape[:2]
@@ -68,8 +79,18 @@ def find_panels(a, min_frac=0.06):
     dark = g < 160
     minlen = max(40, int(min_frac * min(H, W)))
     th = max(6, int(0.006 * max(H, W)))
-    hs = _segments(dark, minlen, th)
-    vs = [(c, t, s, e) for c, t, s, e in _segments(dark.T, minlen, th)]
+    def smear(m, ax_):  # 살짝 기운 스캔: 선이 계단처럼 끊기지 않게 수직 방향으로 3px 번지게
+        out = m.copy()
+        for k in (1, 2, 3):
+            out[k:] |= m[:-k] if ax_ == 0 else out[k:]
+            out[:-k] |= m[k:] if ax_ == 0 else out[:-k]
+        return out
+    if tilt:
+        hs = _segments(smear(dark, 0), minlen, th + 6)
+        vs = [(c, t, s, e) for c, t, s, e in _segments(smear(dark.T, 0), minlen, th + 6)]
+    else:
+        hs = _segments(dark, minlen, th)
+        vs = [(c, t, s, e) for c, t, s, e in _segments(dark.T, minlen, th)]
     cands = []
     for vx, vt, vs0, ve in vs:
         # 왼쪽 끝이 이 세로축에 닿는 가로선들 (아래 축, 위 테두리, 위아래로 붙은 그래프의 공유 축)
@@ -87,6 +108,20 @@ def find_panels(a, min_frac=0.06):
                 continue
             he = max(e for y_, t_, s_, e in hs if y_ == hy and meets(s_, t_))
             cands.append([vx, top, he + 0.5, hy])
+    for b in cands:  # 번지게 한 선의 가운데 → 실제 축선 가운데로 (±5px 안에서 어두운 픽셀이 가장 많은 열·행)
+        r0, r1, c0, c1 = int(b[1]), int(b[3]), int(b[0]), int(b[2])
+        xs = [x for x in range(max(0, int(b[0]) - 5), min(W, int(b[0]) + 6))]
+        if xs and r1 > r0:
+            cnt = [dark[r0:r1, x].sum() for x in xs]
+            best = max(cnt)
+            sel = [x for x, c_ in zip(xs, cnt) if c_ >= 0.8 * best]
+            b[0] = (min(sel) + max(sel)) / 2 + 0.5
+        ys = [y for y in range(max(0, int(b[3]) - 5), min(H, int(b[3]) + 6))]
+        if ys and c1 > c0:
+            cnt = [dark[y, c0:c1].sum() for y in ys]
+            best = max(cnt)
+            sel = [y for y, c_ in zip(ys, cnt) if c_ >= 0.8 * best]
+            b[3] = (min(sel) + max(sel)) / 2 + 0.5
     # 같은 모서리를 가진 후보(격자선 등)는 가장 큰 것만, 다른 축 상자 안에 든 상자(범례 틀·삽입 그림)는 뺌
     cands.sort(key=lambda b: -(b[2] - b[0]) * (b[3] - b[1]))
     boxes = []
@@ -109,17 +144,18 @@ def find_panels(a, min_frac=0.06):
         lb = dark[y0:y1, max(0, x0 - int(0.25 * (x1 - x0)) - 10):max(0, x0 - 3)]
         has_lbl = bool(lb.size and lb.any(axis=0).sum() >= 4)
         lbg = D.gray(a[y0:y1, max(0, x0 - 40):max(0, x0 - 3)])
+        inner_busy = busy
         if lbg.size and float((lbg < 235).mean()) > 0.5:  # 축 왼쪽도 빽빽함 → 지도 속 삽입 그림
             busy = max(busy, 0.6)
         kind = "image" if busy > 0.55 else "plot" if has_lbl else "other"
         why = {"image": "안이 빽빽함 (지도·사진)", "other": "왼쪽 눈금 글자가 없음 (그래프가 아닐 수 있음)"}.get(kind, "")
-        out.append({"box": [float(v) for v in b], "kind": kind, "why": why, "busy": round(busy, 3),
+        out.append({"box": [float(v) for v in b], "kind": kind, "why": why, "busy": round(busy, 3), "inner": round(inner_busy, 3),
                     "score": (x1 - x0) * (y1 - y0) * (1 if kind == "plot" else 0.1)})
     # 칸막이 그래프: 같은 높이의 상자가 바짝 붙어 줄지어 있으면(왼쪽 상자의 값축을 같이 씀) 한 그래프로
     out.sort(key=lambda p: p["box"][0])
     merged = []
     for p in out:
-        q = next((q for q in merged if q["kind"] == p["kind"] == "plot" and abs(q["box"][1] - p["box"][1]) <= 4
+        q = next((q for q in merged if q["kind"] == "plot" and p["inner"] <= 0.55 and abs(q["box"][1] - p["box"][1]) <= 4
                   and abs(q["box"][3] - p["box"][3]) <= 4 and -2 <= p["box"][0] - q["box"][2] <= max(12, 0.02 * W)), None)
         if q:
             q["box"] = [q["box"][0], min(q["box"][1], p["box"][1]), p["box"][2], max(q["box"][3], p["box"][3])]
@@ -244,7 +280,7 @@ def detect_bars(a, box, base_row, axis_rows=None, left_col=None):
     if x1 - x0 < 10 or yb - y0 < 10:
         return []
     full = ink_mask(a[:, x0:x1])
-    while yb - 1 > y0 and _contig(full[yb - 1], 0, x1 - x0 - 1) > 0.9 * (x1 - x0):  # 축선 위 안티앨리어싱 행도 축선
+    while yb - 1 > y0 and (_contig(full[yb - 1], 0, x1 - x0 - 1) > 0.9 * (x1 - x0) or full[yb - 1].mean() > 0.9):  # 축선 위 번짐 행도 축선 (칸막이로 끊긴 축선 포함)
         yb -= 1
     while x0 < x1 - 10 and _contig(ink_mask(a[y0:yb, x0:x0 + 1])[:, 0], 0, yb - y0 - 1) > 0.9 * (yb - y0):  # 세로축선 번짐 열
         x0 += 1
@@ -321,7 +357,7 @@ def detect_bars(a, box, base_row, axis_rows=None, left_col=None):
     out = []
     for l, r, kind in bars:
         b = _measure(sub, ink, g, l, r, h)
-        if b is None:
+        if b is None or (kind == "open" and b["top_outer"] <= 3):  # 칸막이 틀(위 테두리까지 닿는 빈 '막대')
             continue
         b["l"], b["r"] = l + x0, r + x0 + 1  # 픽셀 경계 (r 은 끝 열 다음)
         b["cx"] = (b["l"] + b["r"]) / 2
@@ -335,6 +371,8 @@ def detect_bars(a, box, base_row, axis_rows=None, left_col=None):
             if b["err"].get(key) is not None:
                 b["err"][key] += y0
         out.append(b)
+    # 다른 막대를 품은 넓은 빈 '막대'(칸 틀)는 뺀다
+    out = [b for b in out if not (b["open"] and any(o is not b and b["l"] <= o["l"] and o["r"] <= b["r"] for o in out))]
     return out
 
 
@@ -627,7 +665,7 @@ def legend_patches(a, avoid=(), region=None):
         return []
     ink = ink_mask(sub)
     dark = D.gray(sub) < 170
-    lab, n = _label(_cut_long(ink, 150, 70))  # 범례 틀에 붙은 견본: 긴 직선(틀)을 끊고 본다
+    lab, n = _label(_cut_long(ink, 80, 70))  # 범례 틀에 붙은 견본: 긴 직선(틀)을 끊고 본다
     try:
         from scipy import ndimage
         objs = ndimage.find_objects(lab)
@@ -643,9 +681,9 @@ def legend_patches(a, avoid=(), region=None):
         Y0_, Y1_, x0, x1 = sl[0].start, sl[0].stop, sl[1].start, sl[1].stop
         if not (7 <= Y1_ - Y0_ <= 130 and 10 <= x1 - x0 <= 400):
             continue
-        mm = lab[Y0_:Y1_, x0:x1] == i + 1
         # 위아래로 맞붙은 견본(빽빽한 범례): 오른쪽 글자 줄 사이에서 나눈다
-        txt = dark[Y0_:Y1_, min(dark.shape[1], x1 + 3):min(dark.shape[1], x1 + 3 + 4 * min(40, Y1_ - Y0_))].any(axis=1)
+        tb = dark[Y0_:Y1_, min(dark.shape[1], x1 + 3):min(dark.shape[1], x1 + 3 + 4 * min(40, Y1_ - Y0_))]
+        txt = tb[:, tb.mean(axis=0) < 0.7].any(axis=1) if tb.size else np.zeros(Y1_ - Y0_, bool)  # 범례 틀 세로줄은 빼고
         tl = [r_ for r_ in D.runs(txt) if r_[1] - r_[0] >= 4]
         cuts = [Y0_]
         for (s1, e1), (s2, e2) in zip(tl[:-1], tl[1:]):
@@ -657,17 +695,32 @@ def legend_patches(a, avoid=(), region=None):
             h, w = y1 - y0, x1 - x0
             if not (7 <= h <= 60 and max(10, 0.9 * h) <= w <= 6 * h):
                 continue
-            m = lab[y0:y1, x0:x1] == i + 1
+            m = (lab[y0:y1, x0:x1] == i + 1) | ink[y0:y1, x0:x1]  # 테두리는 끊기 전 잉크로 (맞붙은 견본은 세로 테두리가 길어 지워짐)
+            e0, e1 = max(0, x0 - 3), min(ink.shape[1], x1 + 3)
+            mx = ink[y0:y1, e0:e1]  # 지워진 세로 테두리가 바로 바깥 열에 있을 수 있음
+            lcol = max(mx[:, k].mean() for k in range(0, min(4, mx.shape[1])))
+            rcol = max(mx[:, -k - 1].mean() for k in range(0, min(4, mx.shape[1])))
             border = min(m[0].mean() if len(cuts) == 2 or y0 == Y0_ else 1.0, m[-1].mean() if len(cuts) == 2 or y1 == Y1_ else 1.0,
-                         m[:, 0].mean(), m[:, -1].mean())
+                         lcol, rcol)
+            if lcol >= 0.8 and x0 - e0 and not m[:, 0].mean() >= 0.8:  # 바깥 열의 테두리까지 견본 상자에 넣음
+                x0 = e0 + next(k for k in range(0, 4) if mx[:, k].mean() >= 0.8)
+            if rcol >= 0.8 and not m[:, -1].mean() >= 0.8:
+                x1 = e1 - next(k for k in range(0, 4) if mx[:, -k - 1].mean() >= 0.8)
+            w = x1 - x0
             if border < 0.8 and m.mean() < 0.9:
                 continue
             X0, Y0 = x0 + rx0, y0 + ry0
+            if X0 <= 1 or Y0 <= 1 or X0 + w >= W - 1 or Y0 + h >= H - 1:  # 그림 가장자리에서 잘린 견본(잘린 범례)
+                continue
             if any(b[0] - 2 <= X0 and b[1] - 2 <= Y0 and X0 + w <= b[2] + 2 and Y0 + h <= b[3] + 2 for b in avoid):
                 continue
             # 오른쪽 글자: 견본 높이 3배 안에 어두운 픽셀
             right = dark[y0:y1, x1 + 2:min(dark.shape[1], x1 + 2 + 3 * h)]
             if right.size == 0 or right.any(axis=0).sum() < 2:
+                continue
+            tr_ = D.runs(right[:, right.mean(axis=0) < 0.7].any(axis=1)) if right.size else []
+            th_ = max((e_ - s_ + 1 for s_, e_ in tr_), default=0)
+            if th_ < 4 or h > 2.0 * th_ + 4:  # 견본은 글자 줄 높이 정도 (막대 끝에 붙은 % 주석은 막대가 훨씬 큼)
                 continue
             pats.append([X0, Y0, X0 + w, Y0 + h, i + 1])
     out = []
@@ -752,10 +805,10 @@ def assign_series(bars, legend=()):
     for b in bars:
         for sgm in b["segs"]:
             sgm["series"] = new[sgm["series"]]
-    pairs = sorted((sig_dist(s["sig"], p["sig"]), i, j) for i, s in enumerate(series) for j, p in enumerate(legend))
+    pairs = sorted((sig_dist(s["sig"], p["sig"]) + p.get("penalty", 0), i, j) for i, s in enumerate(series) for j, p in enumerate(legend))
     used_s, used_l = set(), set()
     for d, i, j in pairs:
-        if d < 120 and i not in used_s and j not in used_l:
+        if d < 120 + legend[j].get("penalty", 0) and i not in used_s and j not in used_l:
             series[i]["legend"] = j
             used_s.add(i)
             used_l.add(j)
@@ -790,3 +843,36 @@ def axis_break(a, ax):
             if (L & R & (wide < 25)).sum() >= 2:  # 축을 가로지르는 짧은 // 끊김 표시 (긴 가로선·범례 틀은 아님)
                 return {"y": float(y0), "side": "top"}
     return None
+
+
+def slanted_labels(a, ax, bars):
+    """비스듬히(회전해) 쓴 범주 글자: 축 아래 글자 덩어리마다 위 끝(축에 가까운 끝)이 어느 막대 밑인지로 짝짓는다.
+    글자가 비스듬하지 않으면 None. → 막대마다 글자 상자 [x0, y0, x1, y1] 또는 None"""
+    H, W = a.shape[:2]
+    xa = ax["xaxis"]
+    top = int(xa["r1"]) + 3
+    bot = min(H, top + int(0.3 * H))
+    band = D.gray(a[top:bot]) < 150
+    if not band.any() or len(bars) < 2:
+        return None
+    grp = D._shift_and(band, 2, "or")  # 글자끼리 잇기
+    lab, n = _label(grp)
+    cs = [b["c"] for b in bars]
+    sp = float(np.median(np.diff(cs))) if len(cs) > 1 else 50.0
+    found, slant = {}, 0
+    for i in range(1, n + 1):
+        ys, xs = np.nonzero((lab == i) & band)
+        if len(ys) < 15 or ys.min() > 0.08 * H:  # 축 바로 밑에서 시작하는 글자만
+            continue
+        hgt, wid = ys.max() - ys.min() + 1, xs.max() - xs.min() + 1
+        r = abs(np.corrcoef(xs, ys)[0, 1]) if hgt > 3 and wid > 3 else 0
+        if r > 0.6 and hgt > 0.35 * wid:
+            slant += 1
+        up = ys <= ys.min() + 0.25 * hgt
+        ax_ = float(xs[up].mean())  # 위 끝
+        j = int(np.argmin([abs(c - ax_) for c in cs]))
+        if abs(cs[j] - ax_) <= 0.6 * sp and (j not in found or found[j][4] < len(ys)):
+            found[j] = [int(xs.min()), top + int(ys.min()), int(xs.max()) + 1, top + int(ys.max()) + 1, len(ys)]
+    if slant < max(2, 0.5 * len(found)):
+        return None
+    return [found[j][:4] if j in found else None for j in range(len(bars))]

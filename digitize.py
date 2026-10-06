@@ -586,9 +586,11 @@ def match_legend(legend, suggestions):
                     best = (d, i)
         if best and best[0] < 160:
             used.add(best[1])
-            out.append({"name": it.get("name") or "", "color": suggestions[best[1]]["color"], "style": it.get("style") or ""})
+            out.append({"name": it.get("name") or "", "color": suggestions[best[1]]["color"], "style": it.get("style") or "",
+                        "marker": it.get("marker") or "", "axis": it.get("axis") or ""})
         else:
-            out.append({"name": it.get("name") or "", "color": want or "", "style": it.get("style") or ""})
+            out.append({"name": it.get("name") or "", "color": want or "", "style": it.get("style") or "",
+                        "marker": it.get("marker") or "", "axis": it.get("axis") or ""})
     for i, s in enumerate(suggestions):
         if i not in used and not legend:
             out.append({"name": f"계열 {len(out) + 1}", "color": s["color"], "style": ""})
@@ -683,7 +685,7 @@ def find_legend_boxes(a, box):
             t = min(7, max(2, int(0.12 * min(e - s, r2 - r))))  # 둥근 모서리 허용폭 — 동그라미 표식은 안 걸리게
             lv = any(abs(c - s) <= t and vs <= r + t and ve >= r2 - t for c, vs, ve in vseg)
             rv = any(abs(c - e) <= t and vs <= r + t and ve >= r2 - t for c, vs, ve in vseg)
-            if lv and rv and (e - s) * (r2 - r) < 0.4 * w * h:
+            if lv and rv and (e - s) * (r2 - r) < 0.4 * w * h and ink[r + 2:r2 - 1, s + 2:e - 1].mean() < 0.5:  # 범례 상자는 속이 대개 비어 있음 (꽉 찬 막대가 아님)
                 bx = [x0 + s - t, y0 + r - 2, x0 + e + t + 1, y0 + r2 + 3]
                 if not any(abs(bx[0] - o[0]) < 4 and abs(bx[1] - o[1]) < 4 for o in out):
                     out.append(bx)
@@ -800,9 +802,9 @@ def _boxes(m):
         return out
 
 
-def _text_filter(pts_c, dark, size, ink=None, same=None):
+def _text_filter(pts_c, dark, size, ink=None, same=None, why=None):
     """글자(가까이 줄지어 선 작은 덩어리)와 범례 견본(오른쪽에 글자가 붙은 표식)을 골라낸다 → 버릴 번호 집합"""
-    bx = [b for b in _boxes(dark) if 4 <= (b[3] - b[1]) <= 3 * size + 8 and (b[2] - b[0]) <= 4 * size + 12]
+    bx = [b for b in _boxes(dark) if 4 <= (b[3] - b[1]) <= 3 * size + 8 and (b[2] - b[0]) <= 12 * size + 40]  # 흐린 그림은 낱말이 한 덩어리
     if not bx:
         return set()
     B = np.asarray(bx, float)
@@ -826,14 +828,15 @@ def _text_filter(pts_c, dark, size, ink=None, same=None):
         # 범례 견본: 오른쪽 (글자 높이 3배 안)에 글자 덩어리 B1, 그 바로 옆(글자 사이 간격)에 비슷한 높이의 B2
         def text_right(bx0, by0, bx1, by1):
             hh = by1 - by0
+            hits = []
             g1 = B[:, 0] - bx1
             for j in np.flatnonzero(vov(by0 - 0.3 * hh, by1 + 0.3 * hh) & (g1 >= 0) & (g1 <= np.maximum(3 * Bh + 0.5 * size, max(6 * size, 45)))
                                     & ~((B[:, 0] >= bx0 - 1) & (B[:, 2] <= bx1 + 1))):
                 g2 = B[:, 0] - B[j, 2]
                 r = Bh / max(Bh[j], 1)
                 if (vov(B[j, 1], B[j, 3]) & (g2 >= -1) & (g2 <= Bh[j] + 1) & (r > 0.25) & (r < 2.5)).any():
-                    return float(B[j, 0])  # 글자 시작 x
-            return None
+                    hits.append(float(B[j, 0]))
+            return min(hits) if hits else None  # 글자 시작 x (가장 왼쪽 글자)
         legend = False
         tx = text_right(x0, y0, x1, y1)
         if tx is not None:
@@ -854,6 +857,8 @@ def _text_filter(pts_c, dark, size, ink=None, same=None):
             legend = any(t is not None and abs(t - tx) <= 3 for t in (text_right(*C[j]) for j in np.flatnonzero(sim)))
         if near or legend:
             drop.add(i)
+            if why is not None:
+                why[i] = "legend" if legend and not near else "text"
     return drop
 
 
@@ -944,7 +949,7 @@ def extract_points(m, off, min_area=4, max_area=None, rgb=None):
     if rgb is not None and keep:
         size = float(np.median([max(c[3], c[4]) for c in keep]))
         rg_ = rgb.astype(np.int16)
-        dark = ((gray(rgb) < 110) & ((rg_.max(axis=2) - rg_.min(axis=2)) < 80)) | m  # 글자(검정) + 이 계열 — 다른 색 표식은 글자로 안 봄
+        dark = ((gray(rgb) < 160) & ((rg_.max(axis=2) - rg_.min(axis=2)) < 80)) | m  # 글자(검정) + 이 계열 — 다른 색 표식은 글자로 안 봄
         _clear_edge_ticks(dark)  # 안쪽 눈금은 글자가 아님
         dark[:2] = dark[-2:] = False
         dark[:, :2] = dark[:, -2:] = False
@@ -1022,6 +1027,12 @@ def run_series(a, calib, box, s, excludes=(), legends=None):
     """한 계열 자동 추출 → {px: 픽셀 점, data: 데이터 점, warn, mask, off}. 범례 상자는 자동으로 뺀다(skip_legend)."""
     color = hex2rgb(s["color"]) if isinstance(s.get("color"), str) else tuple(s["color"])
     tol = float(s.get("tol") or 60)
+    if s.get("how") == "markers" and s.get("mode") != "points":  # 선 위 표식 중심 = 데이터 점
+        r = auto_series(a, calib, box, rgb2hex(color), legends=legends, tol=tol)
+        if r["kind"] != "line+markers":
+            r["warn"] = ["선 위에서 표식을 찾지 못해 50점으로 나눠 뽑았습니다"] + r["warn"]
+        m, off = mask_for(a, color, tol, box, list(excludes or ()) + (legends or []), s.get("remove_lines", True))
+        return {"px": r["px"], "data": r["data"], "warn": r["warn"], "mask": m, "off": off}
     ex = list(excludes or ())
     if s.get("skip_legend", True):
         ex += find_legend_boxes(a, box) if legends is None else legends
@@ -1043,3 +1054,231 @@ def run_series(a, calib, box, s, excludes=(), legends=None):
     if m.mean() > 0.25:
         warn.append("마스크가 영역의 25% 이상 — 허용오차가 너무 크거나 배경색을 골랐습니다")
     return {"px": px, "data": data, "warn": warn, "mask": m, "off": off}
+
+
+def auto_series(a, calib, box, color, legends=None, tol=60, n=50, hint=None):
+    """추출 방식 자동 선택 — 화면에서 ▶ 추출을 따로 누르지 않아도 되게.
+    선(열마다 이어짐) / 점(띄엄띄엄 표식) / 선+표식(표식 = 실제 데이터 점 → 표식 중심을 씀) 을 마스크 모양으로 가른다.
+    hint: VLM 범례 모양('line'·'markers'·'dashed'), 참고만. → {mode, how, px, data, warn, kind}"""
+    s = dict(color=color, tol=tol)
+    ln = run_series(a, calib, box, dict(s, mode="line", how="all"), legends=legends)
+    pt = run_series(a, calib, box, dict(s, mode="points"), legends=legends)
+    lpx, mk = ln["px"], pt["px"]
+    warn = []
+    if not lpx and not mk:
+        return {"mode": "line", "how": "n", "px": [], "data": [], "warn": ln["warn"], "kind": "none"}
+    span = (max(p[0] for p in lpx) - min(p[0] for p in lpx) + 1) if lpx else 0
+    dens = len(lpx) / span if span else 0  # 선이 지나는 열 비율 (점선이면 낮음, 산점이면 아주 낮음)
+    m = ln["mask"]
+    blob = len(mk) >= 2 and (dens < 0.35 or (hint == "markers" and dens < 0.6))
+    if blob:
+        out = {"mode": "points", "how": "all", "px": mk, "data": pt["data"], "warn": pt["warn"], "kind": "points"}
+    else:
+        on = 0
+        if len(mk) >= 3 and lpx:
+            P = np.asarray(lpx)
+            for x, y in mk:
+                j = int(np.argmin(np.abs(P[:, 0] - x)))
+                if abs(P[j, 0] - x) <= 3 and abs(P[j, 1] - y) <= 6:
+                    on += 1
+        if len(mk) >= 3 and on >= 0.7 * len(mk):  # 선 위에 표식 → 표식이 데이터 점
+            mk = sorted(mk)
+            P = np.asarray(lpx)
+            dx = float(np.median(np.diff([p[0] for p in mk])))
+            fill = []
+            for (xa, ya_), (xb, yb_) in zip(mk[:-1], mk[1:]):  # 등간격 표식 사이가 2·3칸 비면 (다른 선·범례에 가린 표식) 선 위치로
+                k = int(round((xb - xa) / dx)) if dx > 4 else 1
+                if 2 <= k <= 3 and abs((xb - xa) / dx - k) < 0.15:
+                    for q in range(1, k):
+                        x = xa + (xb - xa) * q / k
+                        yl = ya_ + (yb_ - ya_) * q / k  # 이웃 표식 사이 직선
+                        j = int(np.argmin(np.abs(P[:, 0] - x)))
+                        y = float(P[j, 1]) if abs(P[j, 0] - x) <= 2 else yl
+                        if abs(y - yl) > 0.5 * abs(yb_ - ya_) + 3:  # 선 추적이 교차점에서 다른 선으로 넘어감 → 이웃 사이 직선
+                            y = yl
+                        fill.append([x, y])
+            pw = [w for w in pt["warn"] if "침식" not in w]
+            if fill:
+                pw.append(f"다른 선·글자에 가려 안 보이는 표식 {len(fill)}개는 등간격으로 보고 선 위치로 채웠습니다 — 확인하세요")
+            mk = sorted(mk + fill)
+            X, Y = to_data(calib, [p[0] for p in mk], [p[1] for p in mk])
+            out = {"mode": "line", "how": "markers", "px": mk, "data": [[float(x), float(y)] for x, y in zip(X, Y)], "warn": pw,
+                   "kind": "line+markers"}
+        else:
+            d = resample(calib, lpx, "n", n)
+            if d:
+                X, Y = to_pixel(calib, [q[0] for q in d], [q[1] for q in d])
+                px = [[float(x), float(y)] for x, y in zip(X, Y)]
+            else:
+                px = []
+            out = {"mode": "line", "how": "n", "px": px, "data": d, "warn": ln["warn"], "kind": "line"}
+            if dens < 0.85 and span > 0.2 * (box["x1"] - box["x0"]):
+                warn.append("점선·끊긴 선으로 보입니다 — 빈 곳은 보간했습니다")
+    if m.size and m.mean() > 0.25:
+        warn.append("이 색이 그림의 넓은 면적을 차지합니다 — 배경·채움 색일 수 있습니다")
+    out["warn"] = out["warn"] + warn
+    return out
+
+
+def right_labels(a, ax):
+    """오른쪽 y축(둘째 축) 눈금 글자 덩어리: 그림 영역 오른쪽 테두리 바깥 첫 글기둥 → {"y": 중심들(위→아래), "boxes"}"""
+    H, W = a.shape[:2]
+    dark = gray(a) < 160
+    box = ax["box"]
+    x1 = int(round(box["x1"]))
+    lo = min(W, x1 + 2)
+    # 바깥 눈금(축에 붙은 짧은 가로줄)은 건너뜀: 축에서 이어진 잉크 열
+    while lo < min(W, x1 + 14) and dark[int(box["y0"]):int(box["y1"]), lo].mean() > 0.02 and dark[int(box["y0"]):int(box["y1"]), lo].sum() < 0.2 * (box["y1"] - box["y0"]):
+        lo += 1
+    hi = min(W, x1 + int(0.3 * W))
+    r0, r1 = max(0, int(box["y0"]) - int(0.05 * H)), min(H, int(box["y1"]) + int(0.05 * H))
+    band = dark[r0:r1, lo:hi]
+    if not band.size:
+        return {"y": [], "boxes": []}
+    inb = band[max(0, int(box["y0"]) + 3 - r0):max(1, int(box["y1"]) - 2 - r0)]
+    inb = inb[inb.mean(axis=1) < 0.6] if inb.size else inb
+    cr = merge(runs((inb if inb.size else band).any(axis=0)), 3)
+    if not cr:
+        return {"y": [], "boxes": []}
+    s_, e_ = cr[0]  # 축에 가장 가까운 글기둥
+    rows = band[:, s_:e_ + 1].any(axis=1)
+    bl = merge(runs(rows), 1)
+    return {"y": [r0 + (bs + be) / 2 + 0.5 for bs, be in bl], "boxes": [[lo + s_, r0 + bs, lo + e_ + 1, r0 + be + 1] for bs, be in bl]}
+
+
+def _kmeans(X, k, it=30):
+    """작은 k-평균 (가장 먼 점으로 시작)"""
+    c = [X[0]]
+    for _ in range(1, k):
+        d = np.min([((X - q) ** 2).sum(axis=1) for q in c], axis=0)
+        c.append(X[int(np.argmax(d))])
+    c = np.array(c, float)
+    lab = np.zeros(len(X), int)
+    for _ in range(it):
+        lab = np.argmin([((X - q) ** 2).sum(axis=1) for q in c], axis=0)
+        nc = np.array([X[lab == j].mean(axis=0) if (lab == j).any() else c[j] for j in range(k)])
+        if np.allclose(nc, c):
+            break
+        c = nc
+    return lab
+
+
+def marker_groups(a, calib, box, color, k, legends=None, tol=60):
+    """같은 색(흑백 그림)에서 표식 모양(○□△◇, 속 빈/찬)이 다른 계열 k 개를 가른다.
+    선은 구멍 메우기 → 침식으로 지우고 남은 표식의 모양값(채움·속 빔·위아래 치우침·모서리)으로 k-평균.
+    → {"groups": [[픽셀 점...] × k], "legend": [(그룹 번호, 견본 y) ...], "shape": [모양 이름 × k]} 또는 None"""
+    try:
+        from scipy import ndimage
+    except ImportError:
+        return None
+    col = hex2rgb(color) if isinstance(color, str) else color
+    neutral = max(col) - min(col) < 40 and max(col) < 120
+    m, off = mask_for(a, col, 300 if neutral else tol + 30, box, legends or [])  # 표식 테두리의 안티앨리어싱까지 (속 빈 표식이 닫히게)
+    if neutral:
+        x0_, y0_ = off
+        sub_ = a[y0_:y0_ + m.shape[0], x0_:x0_ + m.shape[1]].astype(np.int16)
+        m &= ((sub_.max(axis=2) - sub_.min(axis=2)) < 60) & (gray(sub_) < 190)
+    if not m.any():
+        return None
+    f = ndimage.binary_fill_holes(m)
+    comps, r, op = [], 0, f
+    for r in range(1, 6):  # 열림(침식→팽창): 가는 선은 사라지고 표식은 제 모양으로 남음
+        st = np.ones((2 * r + 1, 2 * r + 1), bool)
+        op = ndimage.binary_opening(f, structure=st)
+        comps = [c for c in _components(op) if c[0] >= 4]
+        if comps and not any(_linelike(c) and c[0] > 12 for c in comps):
+            break
+    comps = [c for c in comps if not _linelike(c)]
+    if len(comps) < 2 * k:
+        return None
+    med = float(np.median([c[0] for c in comps]))
+    comps = [c for c in comps if 0.3 * med <= c[0] <= 2.5 * med]
+    size = float(np.median([max(c[3], c[4]) for c in comps]))
+    x0, y0 = off
+    rgb = a[y0:y0 + m.shape[0], x0:x0 + m.shape[1]]
+    rg_ = rgb.astype(np.int16)
+    # 글자만: 표식(열림 결과)과 긴 선을 뺀 작은 조각 — 흑백 그림은 선·표식·글자가 다 같은 색이라 '같은 색 이웃 = 글자' 규칙이 표식을 지움
+    rest = m & ~ndimage.binary_dilation(op, iterations=2)
+    lab_r, n_r = ndimage.label(rest, structure=np.ones((3, 3)))
+    textm = np.zeros_like(m)
+    for j, sl in enumerate(ndimage.find_objects(lab_r)):
+        if sl is not None and max(sl[0].stop - sl[0].start, sl[1].stop - sl[1].start) <= 2 * size:
+            piece = lab_r[sl] == j + 1
+            if piece.sum() / max(sl[0].stop - sl[0].start, sl[1].stop - sl[1].start) >= 2.0:  # 가는 획(파선 조각)은 글자로 안 봄
+                textm[sl] |= piece
+    dark = textm | (((gray(rgb) < 160) & ((rg_.max(axis=2) - rg_.min(axis=2)) < 80)) & ~m)
+    inkm = (gray(rgb) < 200) | ((rg_.max(axis=2) - rg_.min(axis=2)) > 60)
+    why = {}
+    drop = _text_filter(comps, dark, size, inkm, np.zeros_like(m), why)  # 글자 이웃 규칙은 끔 (선·파선 조각이 표식 옆에 붙음) — 글자는 아래 무리·추세 거르기로
+    feats, keep = [], []
+    rr = r + 1
+    for i, (n, cx, cy, w, h, bx, by) in enumerate(comps):
+        if i in drop and why.get(i) != "legend":
+            continue
+        fill = n / max(1.0, w * h)  # 열림 결과로 무리 나누기: ○ 0.8, □ 1.0 (작은 △ 는 뭉개지지만 속이 차 있어 따로 모임)
+        # 위아래 치우침은 열림 전(구멍 메운) 표식으로 — △ 판정용
+        y0_, x0_ = max(0, by - rr), max(0, bx - rr)
+        win = op[y0_:by + h + rr, x0_:bx + w + rr]
+        near_ = ndimage.binary_dilation(win, iterations=rr) & f[y0_:by + h + rr, x0_:bx + w + rr]
+        if near_.any():
+            ys_, xs_ = np.nonzero(near_)
+            reg = near_[ys_.min():ys_.max() + 1, xs_.min():xs_.max() + 1]
+        else:
+            reg = op[by:by + h, bx:bx + w]
+        hr = reg.shape[0]
+        top, bot = reg[: hr // 2].sum(), reg[(hr + 1) // 2:].sum()
+        asym = (bot - top) / max(1.0, top + bot)  # △ 아래가 무거움
+        ix, iy = int(round(cx)), int(round(cy))
+        q = max(1, min(w, h) // 5)
+        center = m[max(0, iy - q):iy + q + 1, max(0, ix - q):ix + q + 1].mean()  # 속 빈 표식은 가운데가 빔
+        feats.append([fill * 2, asym * 2, center, w / max(1, h)])
+        keep.append((i, cx + x0 + 0.5, cy + y0 + 0.5))
+    if len(keep) < 2 * k:
+        return None
+    X = np.asarray(feats, float)  # 값 범위가 비슷해서 그대로 (표준화하면 잡음이 큰 쪽으로 쏠림)
+    alive = np.ones(len(X), bool)
+    for _ in range(4):  # 3개 미만인 무리(글자 조각·튀는 점)는 빼고 다시
+        sub = np.flatnonzero(alive)
+        if len(sub) < 2 * k:
+            return None
+        best = None
+        for seed in range(6):
+            order = np.random.default_rng(seed).permutation(len(sub))
+            lb = _kmeans(X[sub][order], k)
+            inert = sum(((X[sub][order][lb == j] - X[sub][order][lb == j].mean(axis=0)) ** 2).sum() for j in range(k) if (lb == j).any())
+            if best is None or inert < best[0]:
+                full = np.empty(len(sub), int)
+                full[order] = lb
+                best = (inert, full)
+        lab = np.full(len(X), -1)
+        lab[sub] = best[1]
+        small = [j for j in range(k) if 0 < (lab == j).sum() < max(3, 0.35 * len(sub) / k)]
+        if not small:
+            break
+        alive &= ~np.isin(lab, small)
+    groups = [[] for _ in range(k)]
+    leg = []
+    for (i, px_, py_), g in zip(keep, lab):
+        if g < 0:
+            continue
+        if why.get(i) == "legend":
+            leg.append((int(g), py_))
+        else:
+            groups[g].append([px_, py_])
+    for gi, g_ in enumerate(groups):  # 무리 추세에서 크게 벗어난 점(범례 견본·글자)은 뺌
+        if len(g_) >= 5:
+            g_.sort()
+            Y_ = np.array([p_[1] for p_ in g_])
+            keep_g = []
+            for j_, p_ in enumerate(g_):
+                nb = np.r_[Y_[max(0, j_ - 2):j_], Y_[j_ + 1:j_ + 3]]
+                if not len(nb) or abs(p_[1] - np.median(nb)) <= max(4 * size, 3 * np.median(np.abs(np.diff(Y_))) + size):
+                    keep_g.append(p_)
+            groups[gi] = keep_g
+    F = np.asarray(feats, float)
+    shape = []
+    for g in range(k):
+        fm = np.median(F[lab == g], axis=0) if (lab == g).any() else np.zeros(4)
+        nm = "triangle" if abs(fm[1]) > 0.3 else ("diamond" if fm[0] < 1.3 else "square" if fm[0] > 1.85 else "circle")
+        shape.append(("hollow " if fm[2] < 0.5 else "") + nm)
+    return {"groups": [sorted(g_) for g_ in groups], "legend": sorted(leg, key=lambda t: t[1]), "shape": shape}

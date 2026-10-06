@@ -140,10 +140,12 @@ VLM_PROMPT = """You read numbers printed on a scientific chart. Images: (1) the 
 (x tick labels), (3) the strip left of the y-axis (y tick labels). Some may be missing.
 Return ONLY a JSON object:
 {"x_ticks": [numbers printed under the x-axis, left to right],
- "y_ticks": [numbers printed beside the y-axis, bottom to top],
+ "y_ticks": [numbers printed beside the LEFT y-axis, bottom to top],
+ "y2_ticks": [numbers printed beside a second y-axis on the RIGHT side, bottom to top; [] if there is none],
  "x_scale": "linear" or "log", "y_scale": "linear" or "log",
  "x_label": "x-axis title with unit", "y_label": "y-axis title with unit", "title": "",
- "legend": [{"name": "series name exactly as printed", "color": "color word, e.g. red/blue/black", "style": "line|dashed|markers"}],
+ "legend": [{"name": "series name exactly as printed", "color": "color word, e.g. red/blue/black", "style": "line|dashed|markers",
+             "marker": "circle|square|triangle|diamond|none", "axis": "left" or "right" (which y-axis the series uses)}],
  "chart_type": "line" or "scatter" or "bar" (vertical bars) or "hbar" (horizontal bars) or "other"}
 For bar charts the category axis has words, not numbers: give an empty list for that axis.
 Rules: copy tick numbers exactly as printed (10^3 or 1e3 -> 1000, 10^-2 -> 0.01, "−0.5" -> -0.5, "1,000" -> 1000).
@@ -236,7 +238,7 @@ def vlm_read(a, det=None, model=None):
            "x_log": str(j.get("x_scale", "")).lower().startswith("log"), "y_log": str(j.get("y_scale", "")).lower().startswith("log"),
            "legend": [x for x in (j.get("legend") or []) if isinstance(x, dict)],
            "chart_type": str(j.get("chart_type") or "").lower()}
-    for k in ("x", "y"):
+    for k in ("x", "y", "y2"):
         vals = []
         for v in j.get(k + "_ticks") or []:
             try:
@@ -330,7 +332,8 @@ TEXT_PROMPT = """Each numbered row [1], [2], ... of this image shows ONE short t
 Copy the text of each row exactly as printed (write subscripts/superscripts as plain text, e.g. CO2, keep * and +).
 Return ONLY JSON: {"labels": {"1": "text", "2": "text", ...}} with one entry per row; null if unreadable."""
 
-CAT_PROMPT = """This is a bar chart. Every bar carries a magenta tag with a number [1], [2], ... drawn at its end.
+CAT_PROMPT = """This is a bar chart. Every bar carries a magenta tag with a number [1], [2], ... drawn at its end and again at
+its foot, just above the category axis.
 For each tag give
  - "category": the category label printed on the category axis for that bar (under the x-axis for vertical bars,
    left of the y-axis for horizontal bars). Join a label printed on two lines with a space. If one label is centered
@@ -365,12 +368,13 @@ def tagged_chart(a, bars, orient):
         t = f"{i + 1}"
         tw, th = (fs * 0.6 * len(t) + 6, fs + 4)
         end = b["ends"][-1]
-        if orient == "v":
-            x, y = b["c"] - tw / 2, max(0, end - th - 4)
+        if orient == "v":  # 막대 끝 위 + 바닥(범주 글자 바로 위) 두 곳
+            spots = [(b["c"] - tw / 2, max(0, end - th - 4)), (b["c"] - tw / 2, b["base"] - th - 3)]
         else:
-            x, y = min(im.width - tw, end + 4), b["c"] - th / 2
-        d.rectangle([x, y, x + tw, y + th], fill=(220, 0, 200))
-        d.text((x + 3, y + 1), t, fill=(255, 255, 255), font=fn)
+            spots = [(min(im.width - tw, end + 4), b["c"] - th / 2), (b["base"] + 3, b["c"] - th / 2)]
+        for x, y in spots:
+            d.rectangle([x, y, x + tw, y + th], fill=(220, 0, 200))
+            d.text((x + 3, y + 1), t, fill=(255, 255, 255), font=fn)
     if max(im.size) > 1400:
         im.thumbnail((1400, 1400))
     return _png(im)
@@ -460,32 +464,45 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
     for b in an["bars"]:
         lo, hi = sorted((conv(b["top_px"]), base))
         rects.append([b["l"], lo, b["r"], hi] if orient == "v" else [lo, b["l"], hi, b["r"]])
-    src = a
     pats = B.legend_patches(a, avoid=rects)
-    if meta and meta.get("parent"):  # 자른 그림: 범례가 잘렸거나 밖에 있을 수 있음 → 원본 둘레에서 더 많이 찾으면 그쪽
+    for p in pats:
+        p["src"] = "image"
+    pa = None
+    if meta and meta.get("parent"):  # 자른 그림: 범례가 잘렸거나 밖에 있을 수 있음 → 원본 둘레에서도 (그래프 안 범례가 우선)
         try:
             pa = image(meta["parent"])
             x0, y0, x1, y1 = meta["box"]
             w_, h_ = x1 - x0, y1 - y0
-            pp = B.legend_patches(pa, avoid=[[r[0] + x0, r[1] + y0, r[2] + x0, r[3] + y0] for r in rects],
+            others = [q["box"] for q in B.find_panels(pa) if q["kind"] == "plot"]  # 다른 그래프 안(막대 조각이 견본처럼 보임)은 빼고
+            pp = B.legend_patches(pa, avoid=[[r[0] + x0, r[1] + y0, r[2] + x0, r[3] + y0] for r in rects] + others,
                                   region=[x0 - 1.2 * w_, 0, x1 + 1.2 * w_, y1 + 0.2 * h_])  # 공유 범례는 흔히 그림 맨 위
-            if len(pp) > len(pats):
-                pats, src = pp, pa
+            inside = [p for p in pp if x0 <= p["box"][0] and p["box"][2] <= x1 and y0 <= p["box"][1] and p["box"][3] <= y1]
+            for p in pp:
+                if p not in inside:
+                    p.update(src="parent", penalty=15)
+                    pats.append(p)
         except (OSError, ValueError):
-            pass
+            pa = None
     series = B.assign_series(an["bars"], pats)
-    names = None
-    if use_vlm and pats:
-        try:
-            names = vlm_read_texts(src, [p["text"] for p in pats], model)
-        except Exception as e:  # 이름만 못 읽음 — 값은 그대로
-            warn.append(f"범례 이름을 읽지 못했습니다 ({e}) — 계열 이름을 직접 고치세요")
+    names = {}
+    used = sorted({s["legend"] for s in series if s["legend"] is not None})
+    if use_vlm and used:
+        for srcname, img in (("image", a), ("parent", pa)):
+            if img is None or not any(pats[j]["src"] == srcname for j in used):
+                continue
+            js = [j for j in range(len(pats)) if pats[j]["src"] == srcname][:30]  # 범례 전체를 한 장에 (일부만 보이면 잘 못 읽음)
+            try:
+                got = vlm_read_texts(img, [pats[j]["text"] for j in js], model) or []
+                names.update({j: t.split("\n")[0].strip() for j, t in zip(js, got) if t})
+            except Exception as e:  # 이름만 못 읽음 — 값은 그대로
+                warn.append(f"범례 이름을 읽지 못했습니다 ({e}) — 계열 이름을 직접 고치세요")
+    src = "parent" if any(pats[j]["src"] == "parent" for j in used) else ("image" if used else None)
     out_series = []
     for i, s in enumerate(series):
         j = s["legend"]
-        nm = (names[j] if names and j is not None and names[j] else None) or f"계열 {i + 1}"
+        nm = names.get(j) or f"계열 {i + 1}"
         out_series.append({"name": nm, "color": s["sig"]["color"], "kind": s["sig"]["kind"], "ink": s["sig"]["ink"],
-                           "legend": j is not None, "legend_box": pats[j]["box"] if j is not None and src is a else None})
+                           "legend": j is not None, "legend_box": pats[j]["box"] if j is not None and pats[j]["src"] == "image" else None})
     bars = []
     for i, b in enumerate(an["bars"]):
         e = b["err"]
@@ -507,10 +524,30 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
                 b["note"] = str(it.get("note") or "").strip()
         except Exception as e:
             warn.append(f"범주 이름을 읽지 못했습니다 ({e}) — 표에서 직접 고치세요")
+    if use_vlm and orient == "v":  # 비스듬한 범주 글자: 막대 밑 위치로 짝짓고 하나씩 읽기 (전체 그림에서 읽으면 한 칸씩 밀리기 쉬움)
+        try:
+            sl = B.slanted_labels(a, ax, bars)
+            if sl:
+                got = vlm_read_texts(a, [x for x in sl if x], model) or []
+                it = iter(got)
+                for b, x in zip(bars, sl):
+                    t = next(it, None) if x else None
+                    if t:
+                        b["cat"] = t.replace("\n", " ").strip()
+        except Exception as e:
+            warn.append(f"비스듬한 범주 글자를 읽지 못했습니다 ({e})")
+    groups_of = {}
+    for b in bars:
+        groups_of.setdefault(b["cat"], set()).add(b.get("group") or "")
+    for b in bars:  # 표에서 같은 범주 아래 나란한 막대(묶음 막대)를 한 줄로 모으는 열쇠 — 번호 붙이기 전 이름. 그룹 이름은 같은 범주가 여러 그룹에 있을 때만
+        b["label"] = f"{b['group']} {b['cat']}".strip() if b.get("group") and len(groups_of[b["cat"]]) > 1 else b["cat"]
+        b["key"] = b["label"] if not b["cat"].startswith("막대 ") else None
+        if b["key"] is None:
+            b.pop("key")
     _unique_cats(bars)
     nerr = sum(1 for b in bars if b["err"])
     return {"ok": True, "orient": orient, "calib": calib, "fit": {name: fit}, "bars": bars, "series": out_series, "warn": warn,
-            "legend_src": "parent" if src is not a else ("image" if pats else None), "n_err": nerr}
+            "legend_src": src, "n_err": nerr}
 
 
 def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", whole=False):
@@ -583,7 +620,7 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
                     full["warn"].append(f"{k}축: VLM 은 {'로그' if said else '선형'}축이라 했지만 눈금 간격은 {'로그' if got else '선형'}축에 맞습니다 — 확인하세요")
         full["bar_guess"] = nb
         det = full
-    if chart == "auto" and not want_bar and not det.get("calib") and nb > 0 and (v or xvals or yvals):
+    if chart == "auto" and not want_bar and not det.get("calib") and nb > 0 and (v or xvals or yvals) and vt not in ("line", "scatter"):
         want_bar = True
         why = "x축(또는 y축)에 숫자 눈금이 없어(범주형) 막대 모드로 전환했습니다. "
     elif want_bar and chart == "auto":
@@ -605,7 +642,7 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
             res["message"] = why + br["error"]
     if not res["message"]:
         if det.get("calib"):
-            res["message"] = "축 보정을 제안했습니다 — 화면의 X1·X2·Y1·Y2 위치를 확인한 뒤 데이터 탭에서 추출하세요."
+            res["message"] = "축 보정을 마쳤습니다 — 화면의 X1·X2·Y1·Y2 위치를 확인하고 데이터 탭에서 추출하세요."
         elif res["error"]:
             res["message"] = res["error"]
         elif not (use_vlm or xvals or yvals):
@@ -623,8 +660,158 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
     det["colors"] = D.suggest_colors(a, det["box"])
     det["legend_boxes"] = D.find_legend_boxes(a, det["box"])
     det["series"] = D.match_legend(legend, det["colors"])
+    if res["mode"] == "xy" and det.get("calib") and v and len(v.get("y2_ticks") or []) >= 2:
+        try:
+            det["calib2"] = right_axis(a, det, v, model)
+        except Exception as e:
+            det.setdefault("warn", []).append(f"오른쪽 y축 눈금을 맞추지 못했습니다 ({e})")
+        if det.get("calib2"):
+            c2 = det["calib2"]["y"]
+            det.setdefault("warn", []).append(f"오른쪽 y축({c2['v1']:g}…{c2['v2']:g})이 따로 있습니다 — 범례에서 오른쪽 축이라고 읽은 계열은 오른쪽 눈금으로 바꿨습니다. "
+                                              "다른 계열도 데이터 탭에서 '오른쪽 y축'을 켜고 끌 수 있습니다.")
+    if res["mode"] == "xy" and det.get("calib") and (use_vlm or xvals or yvals):
+        det["series"] = extract_all(a, det, chart_type=vt)
+        got = [s for s in det["series"] if s.get("px")]
+        if got:
+            res["message"] = (res["message"].replace("데이터 탭에서 추출하세요", "결과 탭의 표를 확인하세요").replace("확인하고 결과", "확인하고, 결과") +
+                              f" 계열 {len(got)}개를 자동으로 뽑았습니다 (" + ", ".join(f"{s['name']} {len(s['px'])}점" for s in got) + ").")
     res["detect"] = det
     return res
+
+
+def right_axis(a, det, v, model=None):
+    """둘째(오른쪽) y축 보정: 오른쪽 테두리 바깥의 눈금·글자 덩어리 + VLM 이 읽은 y2 눈금 값 → 왼쪽과 같은 x, 다른 y 를 쓰는 보정"""
+    ax, calib = det["axes"], det["calib"]
+    box = ax["box"]
+    rl = D.right_labels(a, ax)
+    if len(rl["y"]) < 2:
+        return None
+    dark = D.gray(a) < 150
+    xr = int(round(box["x1"]))
+    r0, r1 = int(round(box["y0"])), int(round(box["y1"]))
+    L = max(12, int(0.03 * max(a.shape[:2])))
+    out_ = dark[r0:r1 + 1, xr + 1:xr + 1 + L].T
+    tk = [r0 + p for p, n in D._ticks_1d(D._run_len(out_), L - 1)] if out_.size else []
+    vals = v.get("y2_ticks") or []
+    opts = []
+    args = dict(ticks=tk, majors=tk, edges=(box["y0"], box["y1"]), log=None, reverse=True, hint=None)
+    c = D.pair_axis(vals, rl["y"], **args)
+    if c:
+        opts.append(c)
+    boxes = rl["boxes"][::-1]
+    if 2 <= len(boxes) <= 30:
+        try:
+            per = vlm_read_blobs(a, boxes, model)
+        except Exception:
+            per = None
+        if per and sum(p is not None for p in per) >= 2:
+            c = D.pair_axis(per, rl["y"], fixed=True, **args)
+            if c:
+                opts.append(c)
+    if not opts:
+        return None
+    f = min(opts, key=lambda c: (c["resid_px"] >= 1.5, c["ambiguous"], -c["n"], c["resid_px"]))
+    return {"x": calib["x"], "y": {"p1": [box["x1"], f["p1"]], "p2": [box["x1"], f["p2"]], "v1": f["v1"], "v2": f["v2"], "log": f["log"]}}
+
+
+def assign_shapes(mg, sers):
+    """표식 무리 ↔ 같은 색 범례 계열 짝: (1) VLM 이 읽은 표식 모양, (2) 범례 견본의 위→아래 순서, (3) 남은 것은 차례대로.
+    → sers[i] 에 줄 무리 번호 목록"""
+    k = len(sers)
+    out = [None] * k
+    used = set()
+    for i, s in enumerate(sers):  # 모양 이름
+        want = str(s.get("marker") or "").lower()
+        for key in ("triangle", "square", "diamond", "circle"):
+            if key in want:
+                g = next((g for g in range(k) if g not in used and key in mg["shape"][g]), None)
+                if g is not None:
+                    out[i] = g
+                    used.add(g)
+                break
+    leg = [g for g, _ in mg["legend"] if g not in used]
+    if len(mg["legend"]) == k and len(set(g for g, _ in mg["legend"])) == k and not used:  # 견본이 다 보이면 위→아래 = 범례 순서
+        return [g for g, _ in mg["legend"]]
+    rest = [g for g in leg] + [g for g in range(k) if g not in used and g not in leg]
+    for i in range(k):
+        if out[i] is None:
+            out[i] = rest.pop(0)
+    return out
+
+
+def extract_all(a, det, chart_type=""):
+    """보정이 끝나면 제안 계열(범례 이름+색, 범례가 없으면 그림에서 찾은 색)을 모두 자동 추출 — 따로 ▶ 추출을 누르지 않아도 표가 찬다.
+    범례가 없을 때 찾은 색 가운데 선·표식이 아닌 것(글자·격자 조각)은 버린다."""
+    calib, box = det["calib"], det["box"]
+    legends = det.get("legend_boxes")
+    out = []
+    named = any(s.get("name") and not s["name"].startswith("계열 ") for s in det.get("series") or [])
+    W = box["x1"] - box["x0"]
+    sers = [s for s in det.get("series") or []]
+    # 같은 색 범례 계열이 여럿(흑백 그림): 표식 모양으로 가른다
+    done = set()
+    rgb = lambda c: np.array(D.hex2rgb(c), float)  # noqa: E731
+    for i, s in enumerate(sers):
+        if i in done or not s.get("color"):
+            continue
+        grp = [j for j, t in enumerate(sers) if t.get("color") and j not in done and np.sqrt(((rgb(t["color"]) - rgb(s["color"])) ** 2).sum()) < 60]
+        if len(grp) < 2:
+            continue
+        done.update(grp)
+        mg = D.marker_groups(a, calib, box, s["color"], len(grp), legends=legends)
+        names = [sers[j]["name"] for j in grp]
+        if not mg:
+            for j in grp:
+                sers[j]["warn"] = ["같은 색 계열이 여럿인데 표식 모양으로 가르지 못했습니다 — 데이터 탭에서 ⊘ 제외 영역·✎ 점 편집으로 나누세요"]
+            continue
+        order = assign_shapes(mg, [sers[j] for j in grp])
+        xs_all = sorted(p[0] for g in mg["groups"] for p in g)
+        grid = []
+        for x in xs_all:  # 모든 무리의 x 를 모아 공통 x 격자 (같은 x 에서 쟀을 때)
+            if grid and x - grid[-1][-1] <= 3:
+                grid[-1].append(x)
+            else:
+                grid.append([x])
+        grid = [float(np.mean(c)) for c in grid if len(c) >= 2]
+        filled = {}
+        for gi, g in enumerate(mg["groups"]):  # 다른 표식과 겹쳐 안 보인 점: 같은 x 격자에서 이웃 사이 직선으로 채움
+            if len(g) < 3:
+                continue
+            gx = [p[0] for p in g]
+            add = []
+            for x in grid:
+                if gx[0] < x < gx[-1] and min(abs(x - q) for q in gx) > 3:
+                    add.append([x, float(np.interp(x, gx, [p[1] for p in g]))])
+            if add:
+                mg["groups"][gi] = sorted(g + add)
+                filled[gi] = len(add)
+        for gi, j in zip(order, grp):
+            pts = mg["groups"][gi]
+            sers[j] = dict(sers[j], px=pts, mode="line", how="markers", kind="line+markers", split=True,
+                           warn=[f"같은 색 계열 {len(grp)}개({', '.join(names)})를 표식 모양으로 나눴습니다 — 이 계열: {mg['shape'][gi]}. 이름이 바뀌었으면 고치세요"]
+                           + ([f"다른 표식과 겹쳐 안 보인 점 {filled[gi]}개는 이웃 점 사이 직선으로 채웠습니다"] if filled.get(gi) else []))
+    for s in sers:
+        if s.get("split") or s.get("warn"):
+            out.append(s)
+            continue
+        if not s.get("color"):
+            out.append(s)
+            continue
+        hint = "markers" if chart_type == "scatter" else ("markers" if "marker" in (s.get("style") or "") and chart_type != "line" else None)
+        r = D.auto_series(a, calib, box, s["color"], legends=legends, hint=hint)
+        px = r["px"]
+        if not named:  # 범례 없음: 선이 그림 폭의 30% 넘게 지나거나 표식이 3개 이상일 때만 계열로
+            xs = [p[0] for p in px]
+            if not px or ((max(xs) - min(xs) < 0.3 * W) and len(px) < 3):
+                continue
+        o = dict(s, px=px, mode=r["mode"], how=r["how"], kind=r["kind"], warn=r["warn"])
+        if det.get("calib2") and str(s.get("axis") or "").lower().startswith("r"):
+            o["calib"] = det["calib2"]  # 오른쪽 y축 계열 — 값은 오른쪽 눈금으로
+        out.append(o)
+    for i, s in enumerate(out):
+        if not s.get("name"):
+            s["name"] = f"계열 {i + 1}"
+    return out
 
 
 # ── 추출·내보내기 ─────────────────────────────────────────────────────────
@@ -637,7 +824,9 @@ def extract(iid, calib, box, series, excludes=()):
 
 
 def series_data(calib, s):
-    """계열 하나 → 데이터 점 (x 순). 점은 늘 픽셀로 들고 다니고 보정으로 바꾼다 — 화면에 보이는 점 = 내보내는 점."""
+    """계열 하나 → 데이터 점 (x 순). 점은 늘 픽셀로 들고 다니고 보정으로 바꾼다 — 화면에 보이는 점 = 내보내는 점.
+    오른쪽 y축 계열은 자기 보정(s["calib"])을 쓴다."""
+    calib = s.get("calib") or calib
     px = s.get("px") or []
     if not px:
         return []
@@ -730,23 +919,37 @@ def bar_values(calib, bar, orient):
 
 
 def bar_table(calib, bars, series, orient="v"):
-    """범주 × 계열 표: 조각 값(쌓인 막대면 조각 높이), 막대 끝(합계), 오차 +/−. long: 조각마다 한 줄"""
+    """범주 × 계열 표 (화면 barRows 와 같은 규칙): 같은 범주 이름(그룹+이름) 아래 나란한 막대는 한 줄에 계열별로.
+    쌓인 막대가 있으면 '막대 끝(합계)', 오차 막대가 있는 계열마다 '오차 +/−'. long: 조각마다 한 줄"""
     names = [s.get("name") or f"계열 {i + 1}" for i, s in enumerate(series)]
+    nm = lambda j: names[j] if j < len(names) else f"계열 {j + 1}"  # noqa: E731
     used = sorted({j for b in bars for j in b.get("series") or []})
-    head = ["범주"] + [names[j] if j < len(names) else f"계열 {j + 1}" for j in used] + ["막대 끝(합계)", "오차 +", "오차 −"]
-    rows, long_ = [], []
+    stacked = any(len(b.get("ends") or []) > 1 for b in bars)
+    err_s = sorted({b["series"][-1] for b in bars if b.get("err")})
+    rows, idx, long_ = [], {}, []
     for b in bars:
         tops, err = bar_values(calib, b, orient)
-        r = {j: "" for j in used}
-        prev = 0.0
+        seg, prev = {}, 0.0
         for j, t in zip(b.get("series") or [], tops):
-            seg = t - prev
-            r[j] = seg if r[j] == "" else r[j] + seg
-            long_.append([b.get("cat") or "", names[j] if j < len(names) else f"계열 {j + 1}", prev, t, seg])
+            seg[j] = seg.get(j, 0.0) + t - prev
+            long_.append([b.get("cat") or "", nm(j), prev, t, t - prev])
             prev = t
-        top = tops[-1] if tops else ""
-        rows.append([b.get("cat") or ""] + [r[j] for j in used] + [top, err[0] - top if err else "", top - err[1] if err else ""])
-    return head, rows, long_
+        key = b.get("key", b.get("cat"))
+        r = idx.get(key)
+        if r is None or any(j in r["seg"] for j in seg):
+            r = {"cat": b.get("label") if b.get("key") is not None else b.get("cat"), "seg": {}, "tops": [], "err": {}}
+            if any(q["cat"] == r["cat"] for q in rows):
+                r["cat"] = b.get("cat")
+            rows.append(r)
+            idx[key] = r
+        r["seg"].update(seg)
+        r["tops"].append(tops[-1] if tops else "")
+        if err:
+            r["err"][b["series"][-1]] = [err[0] - tops[-1], tops[-1] - err[1]]
+    head = ["범주"] + [nm(j) for j in used] + (["막대 끝(합계)"] if stacked else []) + [f"{nm(j)} 오차 {c}" for j in err_s for c in "+−"]
+    out = [[r["cat"]] + [r["seg"].get(j, "") for j in used] + ([r["tops"][0] if len(r["tops"]) == 1 else ""] if stacked else [])
+           + [v for j in err_s for v in r["err"].get(j, ["", ""])] for r in rows]
+    return head, out, long_
 
 
 # ── 이력 (WORKSPACE/projects/<id>.json + history.jsonl) ───────────────────
