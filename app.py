@@ -40,7 +40,8 @@ LLM_KEY = os.environ.get("LLM_API_KEY", "")
 PORT = int(os.environ.get("PORT", "8783"))
 MAX_UPLOAD = 40 * 1024 * 1024
 LOCK = threading.Lock()
-_CACHE = {}  # 이미지 id → numpy 배열 (최근 몇 개)
+_CACHE = {}  # (사용자 폴더, 이미지 id) → numpy 배열 (최근 몇 개)
+_REQ = threading.local()  # 요청을 처리하는 스레드마다 그 사용자의 작업 폴더 (user_ws 로 정함)
 
 
 def read(p):
@@ -48,10 +49,24 @@ def read(p):
         return f.read()
 
 
-def ws(*p):
-    d = os.path.join(WS, *p[:-1]) if len(p) > 1 else WS
+def user_ws(h):
+    """포털이 넘긴 사용자별 작업 폴더. owner(서버 주인)·헤더 없음(단독 실행) = 예전 WORKSPACE 그대로"""
+    u = (h.headers.get("X-Agent-User") or "owner").strip()
+    if u == "owner":
+        return WS
+    d = os.path.join(WS, "u", re.sub(r"[^A-Za-z0-9_.-]", "_", u)[:64] or "_")
     os.makedirs(d, exist_ok=True)
-    return os.path.join(WS, *p)
+    return d
+
+
+def cur_ws():
+    return getattr(_REQ, "ws", WS)
+
+
+def ws(*p):
+    d = os.path.join(cur_ws(), *p[:-1]) if len(p) > 1 else cur_ws()
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(cur_ws(), *p)
 
 
 # ── 이미지·PDF ─────────────────────────────────────────────────────────
@@ -81,14 +96,15 @@ def _png(im):
 def image(iid):
     if not re.fullmatch(r"[0-9a-f]{16}", iid or ""):
         raise ValueError("이미지 id 가 잘못되었습니다")
-    if iid not in _CACHE:
-        p = os.path.join(WS, "images", iid + ".png")
+    k = (cur_ws(), iid)
+    if k not in _CACHE:
+        p = os.path.join(cur_ws(), "images", iid + ".png")
         if not os.path.exists(p):
             raise FileNotFoundError("이미지가 없습니다 — 다시 올려 주세요")
         if len(_CACHE) > 8:
             _CACHE.pop(next(iter(_CACHE)))
-        _CACHE[iid] = D.load(p)
-    return _CACHE[iid]
+        _CACHE[k] = D.load(p)
+    return _CACHE[k]
 
 
 def save_pdf(raw):
@@ -120,7 +136,7 @@ def pdf_pages(p):
 def pdf_render(pid, page, dpi):
     if not re.fullmatch(r"[0-9a-f]{16}", pid or ""):
         raise ValueError("PDF id 가 잘못되었습니다")
-    p = os.path.join(WS, "pdf", pid + ".pdf")
+    p = os.path.join(cur_ws(), "pdf", pid + ".pdf")
     if not os.path.exists(p):
         raise FileNotFoundError("PDF 가 없습니다")
     page, dpi = int(page), max(20, min(600, int(dpi)))
@@ -296,7 +312,7 @@ def vlm_read_blobs(a, boxes, model=None):
 
 def image_meta(iid):
     """자른 그림이면 {"parent": 원본 id, "box": [x0, y0, x1, y1]} (원본 좌표)"""
-    p = os.path.join(WS, "images", iid + ".json")
+    p = os.path.join(cur_ws(), "images", iid + ".json")
     try:
         return json.loads(read(p)) if os.path.exists(p) else {}
     except (ValueError, OSError):
@@ -964,7 +980,7 @@ def save_project(p):
 
 
 def history(limit=200):
-    d = os.path.join(WS, "projects")
+    d = os.path.join(cur_ws(), "projects")
     if not os.path.isdir(d):
         return []
     out = []
@@ -982,7 +998,7 @@ def history(limit=200):
 def load_project(pid):
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}-[0-9a-f]{6}", pid or ""):
         raise ValueError("잘못된 id")
-    return json.loads(read(os.path.join(WS, "projects", pid + ".json")))
+    return json.loads(read(os.path.join(cur_ws(), "projects", pid + ".json")))
 
 
 def models():
@@ -1040,6 +1056,7 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(b)
 
     def do_GET(self):
+        _REQ.ws = user_ws(self)
         u = urllib.parse.urlparse(self.path)
         path, q = u.path, dict(urllib.parse.parse_qsl(u.query))
         try:
@@ -1055,7 +1072,7 @@ class H(BaseHTTPRequestHandler):
                 return self._send(load_project(m.group(1)))
             m = re.fullmatch(r"/api/img/([0-9a-f]{16})\.png", path)
             if m:
-                with open(os.path.join(WS, "images", m.group(1) + ".png"), "rb") as f:
+                with open(os.path.join(cur_ws(), "images", m.group(1) + ".png"), "rb") as f:
                     return self._send(f.read(), "image/png")
             m = re.fullmatch(r"/api/pdfpage/([0-9a-f]{16})/(\d+)\.png", path)
             if m:
@@ -1067,6 +1084,7 @@ class H(BaseHTTPRequestHandler):
             self._send({"error": f"{type(e).__name__}: {e}"}, code=500)
 
     def do_POST(self):
+        _REQ.ws = user_ws(self)
         try:
             n = int(self.headers.get("Content-Length") or 0)
             if n > MAX_UPLOAD * 1.4:
@@ -1100,7 +1118,7 @@ class H(BaseHTTPRequestHandler):
             if self.path == "/api/history/delete":
                 pid = req.get("pid") or ""
                 if re.fullmatch(r"\d{4}-\d{2}-\d{2}-[0-9a-f]{6}", pid):
-                    p = os.path.join(WS, "projects", pid + ".json")
+                    p = os.path.join(cur_ws(), "projects", pid + ".json")
                     if os.path.exists(p):
                         os.remove(p)
                 return self._send({"ok": True})
@@ -1145,5 +1163,5 @@ if __name__ == "__main__":
                 s["px"] = list(zip(px.tolist(), py.tolist()))
         sys.stdout.write(export(calib, ss, "csv")[0].decode("utf-8-sig"))
         sys.exit(0)
-    print(f"digitizer local → http://0.0.0.0:{PORT}  (vlm={LLM_API} {LLM_BASE} {MODEL}, workspace={WS})  {_SIG}")
-    ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
+    print(f"digitizer local → http://{os.environ.get('BIND') or '0.0.0.0'}:{PORT}  (vlm={LLM_API} {LLM_BASE} {MODEL}, workspace={WS})  {_SIG}")
+    ThreadingHTTPServer((os.environ.get("BIND", ""), PORT), H).serve_forever()

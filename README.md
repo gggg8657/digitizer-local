@@ -42,6 +42,9 @@ python3 selftest.py           # LLM 없이 합성 그래프로 정확도 검증 
 |---|---|---|
 | `PORT` | `8783` | |
 | `WORKSPACE` | `./_workspace` | 올린 그림 `images/`, PDF `pdf/`, 작업(보정·점) `projects/*.json` |
+| `BIND` | (모든 인터페이스) | 포털이 `127.0.0.1` 을 줌 — 포털을 거쳐서만 접근 |
+
+포털 접속자 기준으로 올린 그림·PDF·이력은 사용자별로 따로 저장합니다(`WORKSPACE/u/<사용자>/`, 포털이 넘기는 `X-Agent-User` 헤더). 서버 주인(owner)·단독 실행은 예전처럼 `WORKSPACE` 바로 아래를 쓰므로 예전 기록이 그대로 보입니다. 포털이 `BIND=127.0.0.1` 을 주면 포털을 거쳐서만 열립니다.
 | `LLM_API` / `LLM_BASE_URL` / `VISION_MODEL`(또는 `LLM_MODEL`) | `ollama` / `http://localhost:11434` / `gemma3:27b` | AI 자동 보정에만 씁니다. 이미지 입력을 받는 모델이어야 하고, 없으면 그 버튼만 꺼집니다. 포털로 띄우면 로컬 Ollama(`:11436`)의 `gemma4:31b` 가 넘어옵니다 |
 
 ## 흐름
