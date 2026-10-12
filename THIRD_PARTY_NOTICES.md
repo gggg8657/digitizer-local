@@ -23,6 +23,5 @@
 ## 확인 필요 (상업 이용 전)
 
 - **PyMuPDF — AGPL-3.0** ([#1](https://github.com/gggg8657/digitizer-local/issues/1)): poppler-utils 가 없을 때만 쓰는 선택 폴백입니다. 상업 이용 시에는 PyMuPDF 를 설치하지 말고 `poppler-utils` 만 설치하세요(코드가 poppler 를 먼저 씁니다).
-- **파동이(KAERI 캐릭터) — 옛 스크린샷 이력** ([#2](https://github.com/gggg8657/digitizer-local/issues/2)): 커밋 67694c6 이전의 `docs/img/*.png` 에 포털 펫 파동이가 찍혀 있었습니다. 지금 파일에는 없지만 공개 이력에 남아 있습니다. 캐릭터 권리는 KAERI·허쉬위쉬에 있습니다.
 
 이 문서는 법률 자문이 아니며, 라이선스는 각 원문이 우선합니다.
