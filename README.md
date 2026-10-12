@@ -2,6 +2,8 @@
 
 논문·보고서의 그래프 그림(스크린샷, PDF 쪽)에서 곡선·점·막대의 값을 숫자로 뽑아 CSV나 엑셀로 내보내는 로컬 웹 도구입니다. 포트 `8783`.
 
+> ⚠️ 연구·내부 시험용 프로토타입입니다(배포·상업 서비스용 아님). 제3자 구성요소의 라이선스는 THIRD_PARTY_NOTICES.md 를 확인하세요.
+
 ![결과 화면 — 내보내기 이름·CSV/엑셀 버튼과 표 미리보기](docs/img/result.png)
 
 ## 무엇을 하나
@@ -198,14 +200,19 @@ matplotlib 으로 참값을 아는 막대그래프를 그려 **값축 자동 보
 ## 출처·감사 (Credits)
 
 - 사용 흐름 참고(코드 가져오지 않음): [WebPlotDigitizer](https://github.com/automeris-io/WebPlotDigitizer) (Ankit Rohatgi, AGPL-3.0)
-- NumPy (BSD-3), Pillow (HPND), openpyxl (MIT, 선택), matplotlib (선택, selftest 합성 그래프), SciPy (선택)
-- 선택 외부 프로그램: poppler-utils `pdftoppm`/`pdfinfo` (GPL-2.0, 별도 실행) 또는 [PyMuPDF](https://github.com/pymupdf/PyMuPDF) (라이선스는 원 저장소 참고)
-- 시험용 그림은 `synth.py` 로 만든 합성 그래프만 씁니다(논문 그림은 저장소에 넣지 않음).
-- **LLM 실행** — OpenAI 호환 API 로 호출합니다(모델 가중치는 동봉하지 않음). 기본 배포는 [Ollama](https://github.com/ollama/ollama) (MIT) 위의 Google [Gemma](https://ai.google.dev/gemma) `gemma4:31b` — 모델 이용 조건은 Gemma 배포처 참고.
+- NumPy (BSD-3), Pillow (MIT-CMU/HPND), openpyxl (MIT, 선택), matplotlib (선택, selftest 합성 그래프), SciPy (BSD-3, 선택)
+- 선택 외부 프로그램: poppler-utils `pdftoppm`/`pdfinfo` (GPL-2.0, 별도 실행). 폴백 [PyMuPDF](https://github.com/pymupdf/PyMuPDF) 는 AGPL-3.0 — **상업 이용 시 PyMuPDF 를 설치하지 말고 poppler-utils 만 쓰세요** ([#1](https://github.com/gggg8657/digitizer-local/issues/1))
+- 예시·스크린샷의 논문 그림: M. L. Machala et al., "Life cycle comparison of industrial-scale lithium-ion battery recycling and mining supply chains", *Nature Communications* 16, 988 (2025), [doi:10.1038/s41467-025-56063-x](https://doi.org/10.1038/s41467-025-56063-x) — [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). 화면 캡처는 원 그림을 자르고 보정 표시·추출점을 겹친 것이며, 표의 값은 이 도구로 읽은 어림값입니다. 논문 PDF 는 저장소에 넣지 않았습니다.
+- selftest 의 시험 그림은 `synth.py` 로 만든 합성 그래프만 씁니다.
+- **LLM 실행** — OpenAI 호환 API 로 호출합니다(모델 가중치는 동봉하지 않음). 기본 배포는 [Ollama](https://github.com/ollama/ollama) (MIT) 위의 Google [Gemma 4](https://ai.google.dev/gemma) `gemma4:31b` (Apache-2.0).
 - 이 도구는 [agent-page-portal](https://github.com/gggg8657/agent-page-portal) 에 연결해 쓰도록 만들었습니다(단독 실행도 됨).
 
-저작권 표기·전체 목록은 `NOTICE` 를 보세요.
+전체 목록·라이선스·상업 이용 확인 항목은 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), 저작권 표기는 `NOTICE` 를 보세요.
 
 ## 라이선스
 
-MIT License — Copyright (c) 2026 DongJu Kim (gggg8657). `LICENSE` 를 보세요.
+MIT License — Copyright (c) 2026 DongJu Kim (gggg8657). `LICENSE` 를 보세요. 제3자 구성요소의 권리는 이 라이선스로 바뀌지 않습니다.
+
+## 만든 사람
+
+DongJu Kim (gggg8657) — 설계·구현

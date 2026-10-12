@@ -1,24 +1,37 @@
 digitizer-local
 ===============
 
-Original work (MIT). 제3자 코드·글꼴·데이터를 동봉하지 않습니다.
-WebPlotDigitizer(Ankit Rohatgi, AGPL-3.0)의 사용 흐름(축 두 점씩 보정 → 색으로 계열 추출 → 수동 보정)을 참고했을 뿐,
-코드는 가져오지 않았습니다. 축·눈금·글자 검출, 색 마스크·열 중심 추적, 범례 상자 검출은 이 패키지에서 새로 작성했습니다.
+이 저장소의 원저작물(코드·UI·프롬프트·문서·도구 설계)은 DongJu Kim(김동주, gggg8657)이 작성했다.
+제3자 구성요소는 각자의 라이선스를 따르며 THIRD_PARTY_NOTICES.md 에 적었다.
+제3자 구성요소의 권리는 이 저장소의 라이선스(MIT)로 바뀌지 않는다.
+연구·내부 시험용 프로토타입이며 배포·상업 서비스용이 아니다.
+
+Original work (MIT): app.py, digitize.py, bars.py, synth.py, ui.html, selftest.py, setup.sh, README.md
+제3자 코드·글꼴·아이콘은 동봉하지 않는다.
+WebPlotDigitizer(Ankit Rohatgi, AGPL-3.0)의 사용 흐름(축 두 점씩 보정 → 색으로 계열 추출 → 수동 보정)만 참고했고,
+코드는 가져오지 않았다. 축·눈금·글자 검출, 색 마스크·열 중심 추적, 범례 상자 검출은 이 저장소에서 새로 작성했다.
 
 pip 의존성 (동봉 안 함):
   numpy — BSD-3-Clause
-  Pillow — HPND License
+  Pillow — MIT-CMU (HPND)
   openpyxl (선택, 엑셀 내보내기) — MIT
-  matplotlib (선택, selftest 의 '논문 같은' 합성 그래프) — PSF 기반 matplotlib License
+  matplotlib (선택, selftest 의 '논문 같은' 합성 그래프) — Matplotlib License (PSF 기반)
   scipy (선택, 있으면 산점 연결 성분 계산을 빠르게) — BSD-3-Clause
-외부 프로그램 (선택): poppler-utils 의 pdftoppm/pdfinfo (GPL-2.0, 별도 실행만 함) 또는 PyMuPDF — PDF 쪽을 그림으로
+외부 프로그램 (선택): poppler-utils 의 pdftoppm/pdfinfo (GPL-2.0, 별도 프로세스로 실행만 함)
+  또는 PyMuPDF (AGPL-3.0 / 상용 이중 라이선스 — 상업 이용 시 설치하지 말 것, GitHub 이슈 #1)
 
-시험용 그림은 synth.py 로 만든 합성 그래프만 씁니다. 논문 그림·사용자가 올린 그림은 저장소에 넣지 않습니다.
+문서의 예시 그림:
+  README 예시와 docs/img/upload.png·panels.png·overlay.png·result.png 에는 다음 논문의 쪽·그림(Fig. 6e 등)이
+  잘린 채로, 보정 표시·추출점을 겹쳐 나온다. 추출값 표는 이 도구로 읽은 어림값이다.
+  M. L. Machala et al., "Life cycle comparison of industrial-scale lithium-ion battery recycling and mining
+  supply chains", Nature Communications 16, 988 (2025), https://doi.org/10.1038/s41467-025-56063-x
+  — CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). 원 논문 PDF 는 저장소에 넣지 않았다.
+  selftest 의 시험 그림은 synth.py 로 만든 합성 그래프만 쓴다.
 
-Files authored for this package (MIT): app.py, digitize.py, bars.py, synth.py, ui.html, selftest.py, setup.sh, README.md
+LLM (not bundled): OpenAI 호환 API 로 호출. 기본 배포는 Ollama (MIT) 위의 Google Gemma 4 `gemma4:31b` (Apache-2.0).
 
-LLM (not bundled): called via an OpenAI-compatible API; default deployment is Ollama (https://github.com/ollama/ollama, MIT)
-  serving Google Gemma (gemma4:31b, https://ai.google.dev/gemma — see Gemma's terms of use).
+캐릭터: 포털 펫 "파동이"는 한국원자력연구원(KAERI) 공식 캐릭터(디자인 허쉬위쉬 HUSHWISH)이며 이 저장소의 저작물이 아니다.
+  권리는 KAERI·허쉬위쉬에 있다. 이전 커밋의 스크린샷에 찍혀 있었다(GitHub 이슈 #2).
 
-This package: Copyright (c) 2026 gggg8657 <dongjukim.dev@gmail.com>
+This package: Copyright (c) 2026 DongJu Kim (gggg8657) <gggg8657@gmail.com>
 화면 하단·메타데이터의 저작자 표기는 지우거나 바꾸지 마세요.
