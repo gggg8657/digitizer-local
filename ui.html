@@ -587,13 +587,32 @@ function niceTicks(lo, hi, n = 5) {
   const step = (r < 1.5 ? 1 : r < 3 ? 2 : r < 7 ? 5 : 10) * mag, out = [];
   for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-9; v += step) out.push(+v.toPrecision(12)); return out;
 }
+// 재구성 그래프 색 — 포털 어두운 테마(html[data-ag-theme$=dark])일 때만 테마 토큰으로(화면 전용 그림, 내보내기 없음).
+// 포털 없이·밝은 테마에서는 예전 흰 종이 색 그대로. 원본 그림과 그 위 표시(점·보정 십자)는 그림 색 기준이라 바꾸지 않음.
+const hexRgb = h => { h = h.replace('#', ''); if (h.length === 3) h = [...h].map(c => c + c).join(''); return [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16)); };
+const relLum = c => { const [r, g, b] = hexRgb(c).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+const contrast = (a, b) => { const x = relLum(a), y = relLum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+function onBg(col, bg, min = 3) {  // 계열색이 어두운 바탕에서 3:1 이 안 되면 같은 색상으로 조금씩 밝게
+  if (!/^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(col) || !/^#[0-9a-f]{6}$/i.test(bg)) return col;
+  const rgb = hexRgb(col); let out = col;
+  for (let t = 0; t <= 1 && contrast(out, bg) < min; t += 0.05) out = '#' + rgb.map(v => Math.round(v + (255 - v) * t).toString(16).padStart(2, '0')).join('');
+  return out;
+}
+function reconColors() {
+  if (!/dark$/.test(document.documentElement.dataset.agTheme || '')) return { bg: '#fff', note: '#888', frame: '#333', tick: '#555', err: '#000', ser: c => c };
+  const cs = getComputedStyle(document.documentElement), tk = (k, d) => cs.getPropertyValue(k).trim() || d, bg = tk('--ag-surface', '#1a1e25');
+  return { bg, note: tk('--ag-ink-3', '#939ba7'), frame: tk('--ag-ink-3', '#939ba7'), tick: tk('--ag-ink-2', '#b4bbc6'), err: tk('--ag-ink', '#e6e8ec'), ser: c => onBg(c, bg) };
+}
+addEventListener('ag-theme', () => {  // 테마를 바꾸면 다시 그림 — 처음 붙는 테마 CSS 는 다 읽힌 뒤 한 번 더
+  drawRecon(); document.querySelectorAll('link[id^="ag-th-"]').forEach(l => { if (!l.sheet) l.addEventListener('load', drawRecon, { once: true }); });
+});
 function drawRecon() {
   const c = $('recon'), dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight; if (!W) return;
   c.width = W * dpr; c.height = H * dpr; const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
-  g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
-  if (S.bar && calOK()) return drawReconBar(g, W, H);
+  const K = reconColors(); g.fillStyle = K.bg; g.fillRect(0, 0, W, H);
+  if (S.bar && calOK()) return drawReconBar(g, W, H, K);
   const all = S.series.map(s => ({ s, d: seriesData(s, false) })).filter(o => o.d.length);  // 그림 모양 비교용: 오른쪽 축 계열도 왼쪽 눈금 위치로
-  g.fillStyle = '#888'; g.font = '12px sans-serif';
+  g.fillStyle = K.note; g.font = '12px sans-serif';
   if (!all.length) { g.fillText('추출한 점이 여기에 다시 그려집니다', 12, 22); return; }
   const xl = S.calib.x.log, yl = S.calib.y.log, fx = v => xl ? Math.log10(v) : v, fy = v => yl ? Math.log10(v) : v;
   // 축 범위 = 보정 영역(원본 그래프 틀)과 같게
@@ -601,28 +620,28 @@ function drawRecon() {
   if (S.box) { const a = toData(S.box.x0, S.box.y1), b = toData(S.box.x1, S.box.y0); [X0, X1, Y0, Y1] = [fx(a[0]), fx(b[0]), fy(a[1]), fy(b[1])]; }
   else { const xs = all.flatMap(o => o.d.map(p => fx(p[0]))), ys = all.flatMap(o => o.d.map(p => fy(p[1]))); [X0, X1, Y0, Y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)]; }
   const L = 52, R = 22, T = 10, B = 28, sx = v => L + (fx(v) - X0) / (X1 - X0) * (W - L - R), sy = v => H - B - (fy(v) - Y0) / (Y1 - Y0) * (H - T - B);
-  g.strokeStyle = '#333'; g.lineWidth = 1; g.strokeRect(L, T, W - L - R, H - T - B);
-  g.fillStyle = '#555'; g.textAlign = 'center';
+  g.strokeStyle = K.frame; g.lineWidth = 1; g.strokeRect(L, T, W - L - R, H - T - B);
+  g.fillStyle = K.tick; g.textAlign = 'center';
   const tk = (lo, hi, log) => log ? Array.from({ length: Math.floor(Math.max(lo, hi)) - Math.ceil(Math.min(lo, hi)) + 1 }, (_, i) => 10 ** (Math.ceil(Math.min(lo, hi)) + i)) : niceTicks(Math.min(lo, hi), Math.max(lo, hi));
   for (const v of tk(X0, X1, xl)) { const x = sx(v); g.fillRect(x, H - B, 1, 4); g.fillText(fmt(v), x, H - B + 15); }
   g.textAlign = 'right';
   for (const v of tk(Y0, Y1, yl)) { const y = sy(v); g.fillRect(L - 4, y, 4, 1); g.fillText(fmt(v), L - 6, y + 4); }
   g.save(); g.beginPath(); g.rect(L, T, W - L - R, H - T - B); g.clip();
   for (const { s, d } of all) {
-    g.strokeStyle = g.fillStyle = s.color; g.lineWidth = 1.5;
+    g.strokeStyle = g.fillStyle = K.ser(s.color); g.lineWidth = 1.5;
     if (s.mode === 'line') { g.beginPath(); d.forEach((p, i) => i ? g.lineTo(sx(p[0]), sy(p[1])) : g.moveTo(sx(p[0]), sy(p[1]))); g.stroke(); }
     for (const p of d) { g.beginPath(); g.arc(sx(p[0]), sy(p[1]), s.mode === 'line' ? 1.8 : 3, 0, 7); g.fill(); }
   }
   g.restore();
 }
 
-function drawReconBar(g, W, H) {
+function drawReconBar(g, W, H, K) {
   const B = S.bar, hz = B.orient === 'h', vk = hz ? 'x' : 'y', lg = S.calib[vk].log, f = v => lg ? Math.log10(Math.max(v, 1e-300)) : v;
   let V0, V1; if (S.box) { const a = toData(S.box.x0, S.box.y1), b = toData(S.box.x1, S.box.y0); [V0, V1] = hz ? [a[0], b[0]] : [a[1], b[1]]; }
   else { const vs = B.bars.flatMap(b => b.ends.map(p => barVal(b, p))); [V0, V1] = [Math.min(0, ...vs), Math.max(...vs)]; }
   const L = hz ? 90 : 52, R = 14, T = 10, Bm = hz ? 28 : 40, n = B.bars.length, pw = W - L - R, ph = H - T - Bm;
   const sv = v => (f(v) - f(V0)) / (f(V1) - f(V0));
-  g.strokeStyle = '#333'; g.lineWidth = 1; g.strokeRect(L, T, pw, ph); g.font = '11px sans-serif'; g.fillStyle = '#555';
+  g.strokeStyle = K.frame; g.lineWidth = 1; g.strokeRect(L, T, pw, ph); g.font = '11px sans-serif'; g.fillStyle = K.tick;
   const tks = lg ? Array.from({ length: Math.floor(f(V1)) - Math.ceil(f(V0)) + 1 }, (_, i) => 10 ** (Math.ceil(f(V0)) + i)) : niceTicks(V0, V1);
   for (const v of tks) { const t = sv(v); if (t < -1e-9 || t > 1 + 1e-9) continue;
     if (hz) { const x = L + t * pw; g.fillRect(x, T + ph, 1, 4); g.textAlign = 'center'; g.fillText(fmt(v), x, T + ph + 15); }
@@ -631,16 +650,16 @@ function drawReconBar(g, W, H) {
   B.bars.forEach((b, i) => {
     const c0 = (i + 0.2) / n, c1 = (i + 0.8) / n; let prev = Math.max(0, Math.min(1, base));
     b.ends.forEach((p, k) => {
-      const t = Math.max(0, Math.min(1, sv(barVal(b, p)))), s = B.series[b.series[k]] || {}, col = s.color || '#888';
+      const t = Math.max(0, Math.min(1, sv(barVal(b, p)))), s = B.series[b.series[k]] || {}, col = K.ser(s.color || '#888');
       const [x, y, w, h] = hz ? [L + prev * pw, T + c0 * ph, (t - prev) * pw, (c1 - c0) * ph] : [L + c0 * pw, T + ph - t * ph, (c1 - c0) * pw, (t - prev) * ph];
       g.globalAlpha = s.kind === 'empty' ? 0 : s.kind === 'hatch' ? 0.55 : 0.9; g.fillStyle = col; g.fillRect(x, y, w, h); g.globalAlpha = 1;
-      g.strokeStyle = s.kind === 'empty' ? col : '#333'; g.strokeRect(x, y, w, h); prev = t;
+      g.strokeStyle = s.kind === 'empty' ? col : K.frame; g.strokeRect(x, y, w, h); prev = t;
     });
     if (b.err) { const hi = sv(barVal(b, b.err[0])), lo = b.err[1] != null ? sv(barVal(b, b.err[1])) : 2 * prev - hi, m = (c0 + c1) / 2;
-      g.strokeStyle = '#000'; g.beginPath();
+      g.strokeStyle = K.err; g.beginPath();
       if (hz) { const yy = T + m * ph; g.moveTo(L + lo * pw, yy); g.lineTo(L + hi * pw, yy); } else { const xx = L + m * pw; g.moveTo(xx, T + ph - lo * ph); g.lineTo(xx, T + ph - hi * ph); }
       g.stroke(); }
-    g.fillStyle = '#555';
+    g.fillStyle = K.tick;
     const key = b.key ?? b.cat, first = B.bars.findIndex(q => (q.key ?? q.cat) === key), last = B.bars.length - 1 - [...B.bars].reverse().findIndex(q => (q.key ?? q.cat) === key);
     if (i === first) { const lab = String(b.key != null ? b.label : b.cat), mid = (first + last + 1) / 2 / n;
       if (hz) { g.textAlign = 'right'; g.fillText(lab.slice(0, 14), L - 4, T + mid * ph + 4); }
