@@ -176,10 +176,11 @@ def chat_vision(prompt, images, model=None):
         if LLM_API == "openai":
             content = [{"type": "text", "text": prompt}] + [{"type": "image_url", "image_url": {"url": "data:image/png;base64," + x}} for x in b64]
             hdr = {"Content-Type": "application/json", **({"Authorization": f"Bearer {LLM_KEY}"} if LLM_KEY else {})}
-            body = {"model": model, "temperature": 0, "messages": [{"role": "user", "content": content}]}
+            body = {"model": model, "temperature": 0, "messages": [{"role": "user", "content": content}],
+                    "response_format": {"type": "json_object"}}  # Ollama 경로의 format:"json" 과 같은 뜻
             req = urllib.request.Request(LLM_BASE + "/chat/completions", json.dumps(body).encode(), hdr)
             with urllib.request.urlopen(req, timeout=600) as r:
-                return json.load(r)["choices"][0]["message"]["content"]
+                return json.load(r)["choices"][0]["message"]["content"] or ""
         body = {"model": model, "stream": False, "think": False, "format": "json", "options": {"temperature": 0},
                 "messages": [{"role": "user", "content": prompt, "images": b64}]}
         for attempt in (0, 1):
