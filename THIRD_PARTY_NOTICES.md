@@ -1,6 +1,6 @@
 # THIRD_PARTY_NOTICES — digitizer-local
 
-이 저장소의 코드(`app.py`·`digitize.py`·`bars.py`·`synth.py`·`ui.html`·`selftest.py`·`setup.sh`)는 DongJu Kim(gggg8657)이 작성했으며 MIT 입니다. 제3자 코드·글꼴·아이콘은 동봉하지 않습니다. 아래는 설치해서 쓰거나, 외부 프로그램으로 부르거나, 문서에 실린 제3자 구성요소입니다.
+이 저장소의 코드(`app.py`·`digitize.py`·`bars.py`·`synth.py`·`ui.html`·`selftest.py`·`setup.sh`)는 DongJu Kim(gggg8657)이 작성했으며 PolyForm Noncommercial 1.0.0 입니다. 제3자 코드·글꼴·아이콘은 동봉하지 않습니다. 아래는 설치해서 쓰거나, 외부 프로그램으로 부르거나, 문서에 실린 제3자 구성요소입니다.
 
 조사 기준: 2026-10-12. 실제 파일(import 문, `requirements.txt`, `setup.sh`, `docs/img/`)을 보고, 라이선스는 패키지 메타데이터·원 저장소 LICENSE·논문 페이지에서 확인했습니다. 버전은 고정하지 않았습니다(`requirements.txt` 하한만).
 
