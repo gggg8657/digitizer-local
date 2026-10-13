@@ -194,7 +194,7 @@ def chat_vision(prompt, images, model=None):
                     continue
                 raise RuntimeError(f"LLM HTTP {e.code}: {msg[:200]}")
     except urllib.error.URLError as e:
-        raise RuntimeError(f"LLM 서버 연결 실패 ({LLM_BASE}): {e.reason}")
+        raise RuntimeError(f"LLM 서버 연결 실패: {e.reason}")  # 내부 주소는 응답에 넣지 않음
 
 
 def parse_json(text):
@@ -1063,7 +1063,7 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/health":
                 return self._send({"ok": True})
             if path == "/api/meta":
-                return self._send({"model": MODEL, "llm": LLM_BASE, "models": models(),
+                return self._send({"model": MODEL, "models": models(),
                                    "pdf": bool(shutil.which("pdftoppm")), "xlsx": _has("openpyxl")})
             if path == "/api/history":
                 return self._send(history())
@@ -1088,6 +1088,9 @@ class H(BaseHTTPRequestHandler):
         try:
             n = int(self.headers.get("Content-Length") or 0)
             if n > MAX_UPLOAD * 1.4:
+                self.close_connection = True
+                while n > 0 and self.rfile.read(min(n, 1 << 20)):  # 본문을 버려 읽어야 포털(프록시)이 502 대신 413 을 받는다
+                    n -= 1 << 20
                 return self._send({"error": "파일이 너무 큽니다 (40MB 이하)"}, code=413)
             req = json.loads(self.rfile.read(n) or b"{}")
             if self.path == "/api/image":
