@@ -1171,4 +1171,4 @@ if __name__ == "__main__":
         sys.stdout.write(export(calib, ss, "csv")[0].decode("utf-8-sig"))
         sys.exit(0)
     print(f"digitizer local → http://{os.environ.get('BIND') or '0.0.0.0'}:{PORT}  (vlm={LLM_API} {LLM_BASE} {MODEL}, workspace={WS})  {_SIG}")
-    ThreadingHTTPServer((os.environ.get("BIND", ""), PORT), H).serve_forever()
+    ThreadingHTTPServer((os.environ.get("BIND", "127.0.0.1"), PORT), __import__("portal_auth").install(H, "digitizer-local")).serve_forever()
