@@ -38,6 +38,7 @@ LLM_BASE = os.environ.get("LLM_BASE_URL", "http://localhost:8000/v1" if LLM_API 
 MODEL = os.environ.get("VISION_MODEL") or os.environ.get("LLM_MODEL", "gemma3:27b")
 LLM_KEY = os.environ.get("LLM_API_KEY", "")
 PORT = int(os.environ.get("PORT", "8783"))
+Image.MAX_IMAGE_PIXELS = 150_000_000  # 업로드 이미지 화소 상한(1.5억) — 이보다 크면 거절, 2배 넘으면 Pillow 가 DecompressionBombError
 MAX_UPLOAD = 40 * 1024 * 1024
 LOCK = threading.Lock()
 _CACHE = {}  # (사용자 폴더, 이미지 id) → numpy 배열 (최근 몇 개)
@@ -74,6 +75,8 @@ def save_image(raw):
     if len(raw) > MAX_UPLOAD:
         raise ValueError("파일이 너무 큽니다 (40MB 이하)")
     im = Image.open(io.BytesIO(raw))
+    if im.width * im.height > Image.MAX_IMAGE_PIXELS:  # 헤더만 읽은 상태에서 거절(압축 폭탄)
+        raise ValueError("이미지 픽셀 수가 너무 많습니다 (1.5억 화소 이하)")
     im.load()
     if max(im.size) > 6000:
         im.thumbnail((6000, 6000))
