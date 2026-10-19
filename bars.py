@@ -62,7 +62,11 @@ def _ink_rows(ink, gap):
 
 def find_panels(a, min_frac=0.06):
     """기본은 선을 그대로 보고, 가장 큰 그래프가 작게 나오면(살짝 기운 스캔에서 축선이 계단처럼 끊김) 번지게 해서 다시 찾는다."""
+    import layout
     p0 = _find_panels(a, min_frac, False)
+    axisless=layout.panels(a)
+    if len(axisless)>sum(p['kind']=='plot' for p in p0):
+        return axisless + [p for p in p0 if p['kind']!='plot']
     big = lambda ps: max([(p["box"][2] - p["box"][0]) * (p["box"][3] - p["box"][1]) for p in ps if p["kind"] == "plot"] or [0])  # noqa: E731
     H, W = a.shape[:2]
     if big(p0) >= 0.3 * H * W:

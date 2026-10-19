@@ -42,6 +42,7 @@ PORT = int(os.environ.get("PORT", "8783"))
 Image.MAX_IMAGE_PIXELS = 150_000_000  # 업로드 이미지 화소 상한(1.5억) — 이보다 크면 거절, 2배 넘으면 Pillow 가 DecompressionBombError
 MAX_UPLOAD = 40 * 1024 * 1024
 LOCK = threading.Lock()
+_LEGENDS = {}  # (user workspace, source image, model) -> shared legend across panels
 _CACHE = {}  # (사용자 폴더, 이미지 id) → numpy 배열 (최근 몇 개)
 _REQ = threading.local()  # 요청을 처리하는 스레드마다 그 사용자의 작업 폴더 (user_ws 로 정함)
 
@@ -164,12 +165,12 @@ Return ONLY a JSON object:
  "y2_ticks": [numbers printed beside a second y-axis on the RIGHT side, bottom to top; [] if there is none],
  "x_scale": "linear" or "log", "y_scale": "linear" or "log",
  "x_label": "x-axis title with unit", "y_label": "y-axis title with unit", "title": "",
- "legend": [{"name": "series name exactly as printed", "color": "color word, e.g. red/blue/black", "style": "line|dashed|markers",
+ "legend": [{"name": "series name exactly as printed", "color": "approximate hex RGB #rrggbb of the legend swatch", "style": "line|dashed|markers",
              "marker": "circle|square|triangle|diamond|none", "axis": "left" or "right" (which y-axis the series uses)}],
  "chart_type": "line" or "scatter" or "bar" (vertical bars) or "hbar" (horizontal bars) or "other"}
 For bar charts the category axis has words, not numbers: give an empty list for that axis.
 Rules: copy tick numbers exactly as printed (10^3 or 1e3 -> 1000, 10^-2 -> 0.01, "−0.5" -> -0.5, "1,000" -> 1000).
-Only numbers that are actually printed; do not invent or extrapolate. Scale is "log" when labels grow by a constant
+Only numbers that are actually printed; do not invent or extrapolate. In-chart data labels are NOT axis ticks. A line+bar infographic without a printed numeric axis must have empty y_ticks and y2_ticks. Scale is "log" when labels grow by a constant
 factor (1, 10, 100 or 10^-1, 10^0, 10^1). Empty list if there is no legend."""
 
 
@@ -221,6 +222,9 @@ def num(v):
         mant = {"": 1.0, "-": -1.0}.get(m.group(1))
         mant = float(m.group(1)) if mant is None else mant
         return mant * 10 ** float(m.group(2) or m.group(3).translate(sup))
+    s=re.sub(r'(년|명|회|건)$','',s)
+    match=re.fullmatch(r'([\d.]+)만([\d.]*)',s)
+    if match:return float(match[1])*10000+(float(match[2]) if match[2] else 0)
     return float(s)
 
 
@@ -271,7 +275,7 @@ def vlm_read(a, det=None, model=None):
 
 
 BLOB_PROMPT = """Each numbered row [1], [2], ... of this image shows ONE tick label cut from a chart axis.
-Read the number in each row exactly as printed (10^3 -> 1000, 10^-2 -> 0.01, "−0.5" -> -0.5).
+Read the number in each row exactly as printed (10^3 -> 1000, 10^-2 -> 0.01, "−0.5" -> -0.5). Korean 만 means 10000: 100만 -> 1000000, 32만 6800 -> 326800. Join wrapped lines of a single number. If a row is not a number, return null.
 Return ONLY JSON: {"labels": {"1": number or null, "2": number or null, ...}} with one entry per row; null if unreadable."""
 
 
@@ -461,7 +465,14 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
     fit = min(opts, key=lambda c: (c["resid_px"] >= 1.5, c["ambiguous"], -c["n"], c["resid_px"]))
     cv = {"p1": fit["p1"], "p2": fit["p2"], "v1": fit["v1"], "v2": fit["v2"], "log": fit["log"]}
     an = B.analyze(a, ax, cv, orient)
+    raster_solid=False
+    if orient=='v' and ax.get('synth_y'):
+        import layout
+        measured=layout.measure_bars(a,bx)
+        if len(measured)>=8 and len(layout.solid_palette(a,bx))>=2:
+            an['bars']=measured;raster_solid=True
     warn = []
+    if raster_solid:warn.append("누적 조각은 픽셀 색 경계에서 측정했습니다. 1픽셀보다 얇은 조각은 판독이 제한됩니다.")
     if fit["resid_px"] > 1.5:
         warn.append(f"{name}축 눈금 값과 위치가 잘 안 맞습니다 (잔차 {fit['resid_px']:.1f}px) — 확인하세요")
     if fit["dropped"]:
@@ -524,6 +535,18 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
         nm = names.get(j) or f"계열 {i + 1}"
         out_series.append({"name": nm, "color": s["sig"]["color"], "kind": s["sig"]["kind"], "ink": s["sig"]["ink"],
                            "legend": j is not None, "legend_box": pats[j]["box"] if j is not None and pats[j]["src"] == "image" else None})
+    # Shared legends may live inside the OTHER panel; do not lose their names.
+    if v and v.get('legend'):
+        available=set(range(len(out_series)))
+        for item in v['legend']:
+            want=D.color_word(item.get('color'))
+            if not want or not available:continue
+            target=np.array(D.hex2rgb(want),float)
+            j=min(available,key=lambda i:np.linalg.norm(np.array(D.hex2rgb(out_series[i]['color']),float)-target))
+            distance=np.linalg.norm(np.array(D.hex2rgb(out_series[j]['color']),float)-target)
+            if distance<160:
+                if out_series[j]['name'].startswith('계열 '):out_series[j]['name']=item.get('name') or out_series[j]['name']
+                available.remove(j)
     bars = []
     for i, b in enumerate(an["bars"]):
         e = b["err"]
@@ -531,7 +554,28 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
                      "ends": [conv(sg["y1"]) for sg in b["segs"]], "series": [sg["series"] for sg in b["segs"]],
                      "err": [conv(e["hi_px"]), conv(e["lo_px"]) if e.get("lo_px") is not None else None] if e.get("hi_px") is not None else None,
                      "open": b["open"]})
-    if use_vlm:
+    numeric_categories=False
+    if orient=='v' and (v or {}).get('x_ticks') and lb.get('x'):
+        xf=D.pair_axis(v['x_ticks'],lb['x'],tk['x'],majors=tk['x_major'],log=False)
+        if xf and xf['resid_px']<1.5:
+            for b in bars:
+                value=xf['v1']+(b['c']-xf['p1'])*(xf['v2']-xf['v1'])/(xf['p2']-xf['p1'])
+                if abs(value-round(value))<.08:value=round(value)
+                b['cat']=f"{value:g}"
+            numeric_categories=True
+            # Physical x ticks with invisible subpixel bars still identify a category;
+            # values stay empty, never invented as zeros.
+            if raster_solid and len(tk['x'])>len(bars) and len(tk['x'])<=len(bars)+3:
+                spacing=float(np.median(np.diff(tk['x'])))
+                missing=0
+                for x in tk['x']:
+                    if min(abs(x-b['c']) for b in bars)<.3*spacing:continue
+                    value=xf['v1']+(x-xf['p1'])*(xf['v2']-xf['v1'])/(xf['p2']-xf['p1'])
+                    bars.append({'cat':f"{round(value):g}",'group':'','c':float(x),'w':[float(x)-3,float(x)+3],'base':base,'ends':[],'series':[],'err':None,'open':False,'note':'1픽셀 미만으로 값 판독 불가'})
+                    missing+=1
+                if missing:warn.append(f"{missing}개 범주의 막대가 1픽셀 미만이라 값은 빈칸으로 남겼습니다.")
+                bars.sort(key=lambda b:b['c'])
+    if use_vlm and not numeric_categories:
         try:
             j = parse_json(chat_vision(CAT_PROMPT, [tagged_chart(a, bars, orient)], model))
             got = j.get("bars") if isinstance(j.get("bars"), dict) else {}
@@ -586,14 +630,14 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
     res["panels"] = panels
     plots = [p for p in panels if p["kind"] == "plot"]
     big = [p for p in plots if (p["crop"][2] - p["crop"][0]) * (p["crop"][3] - p["crop"][1]) >= 0.5 * W * H]
-    if not whole and (len(plots) >= 2 or (plots and not big)):
+    if not whole and len(plots) >= 2:
         res["need_panel"] = True
         skip = len(panels) - len(plots)
         res["message"] = (f"이 그림에서 그래프 {len(plots)}개를 찾았습니다" + (f" (지도·사진 등 {skip}개는 뺌)" if skip else "") +
                           " — 아래 목록에서 하나를 고르거나 ✂ 자르기로 영역을 끌어 고르세요.")
         res["detect"] = {"ok": False, "error": res["message"]}
         return res
-    hint = dict(zip(("x0", "y0", "x1", "y1"), meta["plot"])) if meta.get("plot") else None
+    hint = dict(zip(("x0", "y0", "x1", "y1"), meta["plot"])) if meta.get("plot") else dict(zip(("x0", "y0", "x1", "y1"), plots[0]["box"])) if len(plots)==1 else None
     det = D.auto_calibrate(a, None, None, box_hint=hint)
     res["detect"] = det
     if not det.get("ok"):
@@ -612,6 +656,16 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
             v = vlm_read(a, det, model)
             res["vlm"] = v
             xlog, ylog = v["x_log"], v["y_log"]
+            family=meta.get('parent') or iid
+            cachekey=(cur_ws(),family,model or MODEL)
+            if not v['legend'] and meta.get('parent'):
+                parent_legend=_LEGENDS.get(cachekey)
+                if parent_legend is None:
+                    parent_legend=vlm_read(image(meta['parent']),None,model)['legend']
+                v['legend']=parent_legend
+            if v['legend']:
+                if len(_LEGENDS)>64:_LEGENDS.pop(next(iter(_LEGENDS)))
+                _LEGENDS[cachekey]=v['legend']
             legend = v["legend"]
             lb = det["labels"]
             for k in ("x", "y"):  # 글자 덩어리를 하나씩 다시 읽힘 → 개수 어긋남·모서리 겹침에 강함
@@ -626,6 +680,13 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
                         v[k + "_ticks_each"] = per
         except Exception as e:
             res["error"] = f"VLM 읽기 실패 — 눈금 값을 직접 넣어 주세요 ({e})"
+    if v and chart=='auto':
+        import annotations
+        try:
+            mixed=annotations.auto(a,det,v,lambda image,boxes:vlm_read_blobs(image,boxes,model))
+            if mixed:return mixed
+        except Exception as e:
+            det.setdefault('warn',[]).append(f"혼합 그래프의 인쇄값 보정 실패 ({e})")
     vt = (v or {}).get("chart_type", "")
     xv = xvals or (v or {}).get("x_ticks") or []
     yv = yvals or (v or {}).get("y_ticks") or []

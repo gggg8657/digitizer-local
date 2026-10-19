@@ -139,6 +139,14 @@ def detect_axes(a, hint=None):
             return {"xaxis": {"y": xa[0], "r0": xa[5], "r1": xa[6], "c0": c0, "c1": c1},
                     "yaxis": {"x": ya[0], "c0": ya[5], "c1": ya[6], "r0": ya[3], "r1": ya[4]},
                     "box": box, "frame": True, "synth_y": False}
+    if hint:
+        x0,x1=float(hint['x0']),float(hint['x1'])
+        y0,y1=float(hint['y0']),float(hint['y1'])
+        if 0<=x0<x1<W and 0<=y0<y1<H:
+            # Axisless grids/panels still have a measurable plotting rectangle.
+            return {'xaxis':{'y':y1,'r0':int(y1),'r1':int(y1),'c0':int(x0),'c1':int(x1)},
+                    'yaxis':{'x':x0,'c0':int(x0),'c1':int(x0),'r0':int(y0),'r1':int(y1)},
+                    'box':dict(hint),'frame':False,'synth_y':True}
     synth_y = False
     if not hs or not vs:  # 축선이 없는 그래프(엑셀형: 세로축선 없음·연한 격자만) → 연한 선까지
         light = g < 235
@@ -246,7 +254,7 @@ def label_blobs(a, ax, ticks):
     # x
     tl = ticks["x_len"] if ticks["x_kind"] == "out" else 0
     top = xa["r1"] + 1 + tl + 1
-    mx = int(0.08 * W)
+    mx = max(4, int(0.012 * W)) if ax.get("synth_y") else int(0.08 * W)  # exclude y=0 below an axisless baseline
     c0, c1 = max(0, int(box["x0"]) - mx), min(W, int(box["x1"]) + mx)
     band = dark[top:min(H, top + int(0.3 * H)), c0:c1]
     rr = merge(runs(band.any(axis=1)), 2)
@@ -1070,6 +1078,17 @@ def auto_series(a, calib, box, color, legends=None, tol=60, n=50, hint=None):
     span = (max(p[0] for p in lpx) - min(p[0] for p in lpx) + 1) if lpx else 0
     dens = len(lpx) / span if span else 0  # 선이 지나는 열 비율 (점선이면 낮음, 산점이면 아주 낮음)
     m = ln["mask"]
+    if dens>.7 and len(mk)>=5:
+        # Tiny raster steps on a thin line must not become extra observations.
+        cs=[c for c in _components(_shift_and(m,1,"and")) if c[0]>=2]
+        if len(cs)>=5:
+            floor=.5*float(np.percentile([c[0] for c in cs],90))
+            cs=[c for c in cs if c[0]>=floor]
+            off=ln['off']
+            clean=sorted([[off[0]+c[1]+.5,off[1]+c[2]+.5] for c in cs])
+            if len(clean)>=5 and clean[-1][0]-clean[0][0]>.95*span:
+                dx=np.diff([p[0] for p in clean])
+                if np.std(dx)/np.mean(dx)<.15:mk=clean
     blob = len(mk) >= 2 and (dens < 0.35 or (hint == "markers" and dens < 0.6))
     if blob:
         out = {"mode": "points", "how": "all", "px": mk, "data": pt["data"], "warn": pt["warn"], "kind": "points"}
