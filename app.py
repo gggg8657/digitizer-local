@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -177,24 +178,28 @@ Only numbers that are actually printed; do not invent or extrapolate. In-chart d
 factor (1, 10, 100 or 10^-1, 10^0, 10^1). Empty list if there is no legend."""
 
 
-def chat_vision(prompt, images, model=None):
+def chat_vision(prompt, images, model=None, schema=None, timeout=600):
+    """schema 를 주면 JSON 스키마 안내 디코딩(vLLM response_format json_schema · Ollama format=스키마) — AI 검수용. 없으면 JSON 객체만"""
     model = model or MODEL
     b64 = [base64.b64encode(b).decode() for b in images]
     try:
         if LLM_API == "openai":
             content = [{"type": "text", "text": prompt}] + [{"type": "image_url", "image_url": {"url": "data:image/png;base64," + x}} for x in b64]
             hdr = {"Content-Type": "application/json", **({"Authorization": f"Bearer {LLM_KEY}"} if LLM_KEY else {})}
+            rf = {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema, "strict": True}} if schema else {"type": "json_object"}
             body = {"model": model, "temperature": 0, "messages": [{"role": "user", "content": content}],
-                    "response_format": {"type": "json_object"}}  # Ollama 경로의 format:"json" 과 같은 뜻
+                    "response_format": rf}  # Ollama 경로의 format:"json" 과 같은 뜻
+            if schema:
+                body["max_tokens"] = 1500
             req = urllib.request.Request(LLM_BASE + "/chat/completions", json.dumps(body).encode(), hdr)
-            with urllib.request.urlopen(req, timeout=600) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.load(r)["choices"][0]["message"]["content"] or ""
-        body = {"model": model, "stream": False, "think": False, "format": "json", "options": {"temperature": 0},
+        body = {"model": model, "stream": False, "think": False, "format": schema or "json", "options": {"temperature": 0},
                 "messages": [{"role": "user", "content": prompt, "images": b64}]}
         for attempt in (0, 1):
             try:
                 req = urllib.request.Request(LLM_BASE + "/api/chat", json.dumps(body).encode(), {"Content-Type": "application/json"})
-                with urllib.request.urlopen(req, timeout=600) as r:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
                     return json.load(r)["message"]["content"]
             except urllib.error.HTTPError as e:
                 msg = e.read().decode(errors="replace")
@@ -1529,6 +1534,86 @@ def extract_all(a, det, chart_type=""):
     return out
 
 
+# ── AI 검수 (사용자가 누를 때만, 2026-10-20) ─────────────────────────────────
+def review(req, validate=True):
+    """POST /api/review — 지금 패널의 추출 결과를 VLM 에 보여 주고 정해진 행동만 받아 픽셀로 확인한 것만 적용.
+    req: {id, calib, box, series, legend(이름 목록), style_legend?, model?}. 같은 상태(그림·보정·계열·모델)면 저장된 검수 결과를 돌려준다(VLM 다시 안 부름).
+    → {ok, actions, applied, rejected, warnings, series, series_before, ids, model, vlm_calls, elapsed, cached, message}"""
+    import review as R
+    t0 = time.time()
+    iid = req.get("id")
+    calib, box = req.get("calib"), req.get("box")
+    if not (iid and calib and box):
+        raise ValueError("그림·보정·영역이 있어야 AI 검수를 할 수 있습니다")
+    series = R._norm_series(req.get("series"))
+    if not any(s.get("px") for s in series):
+        raise ValueError("검수할 계열이 없습니다 — 먼저 자동 처리나 추출을 하세요")
+    legend = [str(x)[:80] for x in (req.get("legend") or []) if isinstance(x, (str, int, float))][:30]
+    sty = {k: str(v)[:40] for k, v in (req.get("style_legend") or {}).items() if k in R.STYLES}
+    model = req.get("model") or MODEL
+    a = image(iid)
+    ids = [f"S{i + 1}" for i in range(len(series))]
+    key = R.state_key(iid, calib, series, model)
+    cp = ws("reviews", key + ".json")
+    if validate and os.path.exists(cp):
+        try:
+            out = json.loads(read(cp))
+            out["cached"] = True
+            return out
+        except (ValueError, OSError):
+            pass
+    user = cur_ws()
+    R._check_rate(user)
+    try:
+        img1, img2, _ = R.overlay(a, box, series, ids)
+        prompt = R.PROMPT.replace("{data}", R.data_block(calib, box, series, ids, legend, sty))
+        calls, actions, err = 0, [], None
+        for mode in ("schema", "object"):
+            with R._VLM_SEM:
+                calls += 1
+                try:
+                    text = chat_vision(prompt, [img1, img2], model, schema=R.schema(ids) if mode == "schema" else None, timeout=R.TIMEOUT)
+                except TypeError:  # 시험·벤치의 가짜 VLM(스키마 인자 없음)
+                    text = chat_vision(prompt, [img1, img2], model)
+            try:
+                actions = R.parse_actions(text, ids)
+                err = None
+                break
+            except (ValueError, KeyError) as e:
+                err = str(e)[:100]
+        if err:
+            raise RuntimeError(f"AI 답 형식이 맞지 않습니다({err}) — 다시 해 주세요")
+        new, applied, rejected, warns = R.validate_and_apply(a, calib, box, series, list(ids), actions, legend, sty, validate=validate)
+    finally:
+        with R._LOCK:
+            R._BUSY.discard(user)
+    msg = (f"AI 검수: 제안 {len(actions)}개 중 {len(applied)}개 적용, {len(rejected)}개 거절"
+           + (f", 값 확인 경고 {len(warns)}개" if warns else "") + (" — 고칠 곳이 없다고 봤습니다" if not actions else ""))
+    out = {"ok": True, "actions": actions, "applied": applied, "rejected": rejected, "warnings": warns,
+           "series": [{k: v for k, v in s_.items() if k != "_path"} for s_ in new], "series_before": series, "ids": ids,
+           "model": model, "vlm_calls": calls, "elapsed": round(time.time() - t0, 2), "cached": False, "message": msg, "key": key,
+           "validated": bool(validate)}
+    if validate:
+        with LOCK:
+            with open(cp, "w", encoding="utf-8") as f:
+                json.dump(out, f, ensure_ascii=False, default=_json_default)
+    return out
+
+
+def review_apply(req):
+    """POST /api/review/apply — 검수 때 적용한 행동 가운데 skip 번호를 뺀 나머지를 원래 계열에 다시 적용(VLM 안 부름, 행동마다 되돌리기용)"""
+    import review as R
+    series = R._norm_series(req.get("series"))
+    ids = [f"S{i + 1}" for i in range(len(series))]
+    skip = {int(i) for i in req.get("skip") or [] if isinstance(i, int)}
+    acts = [a_ for k, a_ in enumerate(req.get("actions") or []) if k not in skip and isinstance(a_, dict)]
+    acts = R.parse_actions(json.dumps({"actions": acts}), ids)
+    legend = [str(x)[:80] for x in (req.get("legend") or []) if isinstance(x, (str, int, float))][:30]
+    new, applied, rejected, warns = R.validate_and_apply(image(req.get("id")), req["calib"], req["box"], series, list(ids), acts, legend,
+                                                         req.get("style_legend") or {})
+    return {"ok": True, "series": [{k: v for k, v in s_.items() if k != "_path"} for s_ in new], "applied": applied, "rejected": rejected, "warnings": warns}
+
+
 # ── 추출·내보내기 ─────────────────────────────────────────────────────────
 def extract(iid, calib, box, series, excludes=()):
     a = image(iid)
@@ -1881,6 +1966,14 @@ class H(BaseHTTPRequestHandler):
                 body, name, ctype = export(req["calib"], req.get("series") or [], req.get("format") or "csv", req.get("meta"),
                                            req.get("bars"), req.get("orient") or "v", req.get("calib2"), req.get("lines"))
                 return self._send(body, ctype, filename=name)
+            if self.path == "/api/review":
+                import review as R
+                try:
+                    return self._send(review(req))
+                except R.Busy as e:
+                    return self._send({"error": str(e), "code": "busy"}, code=429)
+            if self.path == "/api/review/apply":
+                return self._send(review_apply(req))
             if self.path == "/api/save":
                 return self._send({"pid": save_project(req.get("project") or {})})
             if self.path == "/api/history/delete":

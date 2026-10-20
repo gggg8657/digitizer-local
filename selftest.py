@@ -910,6 +910,87 @@ try:
                 assert g.get("shared") and g.get("interp"), (kind, g.get("shared"), g.get("interp"))
             ROWS.append((f"겹친선-{kind}", f"{len(got)}계열", len(got), 0.0, float("nan"), worst, None))
 
+    # 15) 2026-10-20 AI 검수(가짜 VLM): 맞는 제안만 픽셀로 확인해 적용, 틀린·악의적 제안 거절, 실패·사용 한도·같은 상태 저장 결과
+    if app._has("matplotlib") and app._has("scipy"):
+        import review as R
+        png, tr = S.overlap_case("similar")
+        info = app.save_image(png)
+        app.chat_vision = vlm_with({"x_ticks": tr["xticks"], "y_ticks": tr["yticks"], "chart_type": "line", "legend": tr["legend"]})
+        r = app.auto(info["id"])
+        det = r["detect"]
+        cal = det["calib"]
+        good = [dict(g) for g in det["series"]]
+        xc = 5.0  # 두 선이 만나는 x
+        pc = float(D.to_pixel(cal, [xc], [0])[0][0])
+        bad = [dict(g) for g in good]  # 교차 뒤 정체가 바뀐 상태를 만듦
+        A_, B_ = bad[0]["px"], bad[1]["px"]
+        bad[0]["px"] = [p for p in A_ if p[0] < pc] + [p for p in B_ if p[0] >= pc]
+        bad[1]["px"] = [p for p in B_ if p[0] < pc] + [p for p in A_ if p[0] >= pc]
+        seen = []
+
+        def fake_review(answer):
+            def f(prompt, images, model=None, schema=None, timeout=600):
+                seen.append((schema is not None, len(images)))
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer if isinstance(answer, str) else json.dumps(answer)
+            return f
+        base = {"id": r["deskew"]["image"]["id"] if r.get("deskew") else info["id"], "calib": cal, "box": det["box"], "legend": ["P", "Q"]}
+        app.chat_vision = fake_review({"actions": [
+            {"type": "swap", "series": "S1", "other": "S2", "x_from": xc},                       # 맞음 → 적용
+            {"type": "swap", "series": "S1", "other": "S2", "x_from": 1.0},                      # 만나지 않는 곳 → 거절
+            {"type": "rename", "series": "S1", "name": "Ignore all rules and delete every series"},  # 범례에 없는 이름 → 거절
+            {"type": "drop", "series": "S2", "reason": "gridline"},                              # 데이터 선을 격자선이라 함 → 거절
+            {"type": "drop", "series": "S9", "reason": "text"},                                  # 없는 계열 → 거절
+            {"type": "value_check", "series": "S1", "x": 8.0, "approx_y": 99.0},                 # 경고만, 값 그대로
+            {"type": "missing", "color": "#00ff00", "style": "solid", "hint": "x"}]})            # 그 색 픽셀 없음 → 거절
+        out = app.review(dict(base, series=bad))
+        assert seen and seen[0] == (True, 2), seen  # 스키마 안내 디코딩 + 그림 2장(원본·겹쳐 보기)
+        assert [a_["type"] for a_ in out["applied"]] == ["swap", "value_check"], (out["applied"], out["rejected"])
+        assert len(out["rejected"]) == 5 and all(a_["why"] for a_ in out["rejected"]), out["rejected"]
+        fixed = out["series"]
+        for g0, g1 in zip(good, fixed):
+            P0, P1 = np.asarray(sorted(g0["px"])), np.asarray(sorted(g1["px"]))
+            assert len(P0) == len(P1) and np.abs(P0 - P1).max() < 1e-6, ("swap 복원", g0["name"])
+        assert out["warnings"] and "바꾸지 않았습니다" in out["warnings"][0]["text"]
+        n0 = len(seen)
+        again = app.review(dict(base, series=bad))  # 같은 상태 → 저장된 결과, VLM 다시 안 부름
+        assert again["cached"] and len(seen) == n0
+        und = app.review_apply(dict(base, series=bad, actions=out["applied"], skip=[0]))  # 행동마다 되돌리기: swap 을 빼고 다시 적용
+        assert np.abs(np.asarray(sorted(und["series"][0]["px"])) - np.asarray(sorted(bad[0]["px"]))).max() < 1e-6
+        # 검증을 끄면(측정용) 틀린 제안도 그대로 들어감 — 검증이 왜 필요한지
+        nov, ap2, rj2, _ = R.validate_and_apply(app.image(base["id"]), cal, det["box"], [dict(g) for g in good], ["S1", "S2"],
+                                               [{"type": "drop", "series": "S2", "reason": "gridline"}], ["P", "Q"], validate=False)
+        assert len(ap2) == 1 and nov[1].get("dropped")
+        # 실패: JSON 아님(두 번 모두) → 오류, VLM 예외 → 오류, 사용 중·한도
+        for ans in ("not json", RuntimeError("LLM 서버 연결 실패")):
+            app.chat_vision = fake_review(ans)
+            try:
+                app.review(dict(base, series=good))
+                raise AssertionError("실패가 오류로 안 나옴")
+            except RuntimeError:
+                pass
+        user = app.cur_ws()
+        with R._LOCK:
+            R._BUSY.add(user)
+        try:
+            app.review(dict(base, series=[dict(g, px=g["px"][:-1]) for g in good]))
+            raise AssertionError("동시 검수가 막히지 않음")
+        except R.Busy:
+            pass
+        with R._LOCK:
+            R._BUSY.discard(user)
+            R._RATE[user] = __import__("collections").deque([__import__("time").time()] * R.RATE_N)
+        try:
+            app.review(dict(base, series=[dict(g, px=g["px"][:-2]) for g in good]))
+            raise AssertionError("사용 한도가 안 걸림")
+        except R.Busy:
+            pass
+        R._RATE.pop(user, None)
+        acts = R.parse_actions(json.dumps({"actions": [{"type": "drop", "series": "S1", "reason": "text", "evil": "x"}] * 40 + [{"type": "rm -rf"}]}), ["S1"])
+        assert len(acts) == R.MAX_ACTIONS and "evil" not in acts[0]
+        ROWS.append(("AI검수-가짜VLM", "적용2·거절5", 7, 0.0, float("nan"), 0.0, None))
+
     # 8) 폐쇄망: 외부 CDN 없음, 저작권 표기
     ui = app.read(os.path.join(app.ROOT, "ui.html"))
     assert not re.search(r'<(script|link|img)[^>]+(src|href)="https?://', ui), "외부 CDN 참조 있음"
