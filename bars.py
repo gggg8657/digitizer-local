@@ -99,6 +99,19 @@ def _find_panels(a, min_frac=0.06, tilt=False):
     def unshadow(ls):  # 번진(바로 세운·흐린) 선의 가장자리 행이 짧게 따로 잡힌 것은 바로 옆의 긴 선에 맡김
         return [l for l in ls if not any(o is not l and abs(o[0] - l[0]) <= 2.5 and abs(o[2] - l[2]) <= 3 and o[3] - o[2] > l[3] - l[2] + 3 for o in ls)]
     hs, vs = unshadow(hs), unshadow(vs)
+
+    def inside_fill(ls, m):  # 칠한 막대 안의 가는 줄(맞닿은 두 색 막대의 경계 행, 막대를 지나는 오차 막대) — 위·아래가 다 칠해져 있으면 축이 아님
+        out = []
+        for l in ls:
+            c, t, s0, e0 = l
+            ra, rb = int(c - t / 2 - 3), int(c + t / 2 + 3)
+            if 0 <= ra and rb < m.shape[0] and e0 > s0:
+                up, dn = m[ra, s0:e0 + 1].mean(), m[rb, s0:e0 + 1].mean()
+                if (m[ra, s0:e0 + 1] & m[rb, s0:e0 + 1]).mean() > 0.5 or (min(up, dn) > 0.3 and up + dn > 1.3):
+                    continue
+            out.append(l)
+        return out
+    hs, vs = inside_fill(hs, dark), inside_fill(vs, dark.T)
     cands = []
     for vx, vt, vs0, ve in vs:
         # 왼쪽 끝이 이 세로축에 닿는 가로선들 (아래 축, 위 테두리, 위아래로 붙은 그래프의 공유 축)
@@ -288,8 +301,9 @@ def detect_bars(a, box, base_row, axis_rows=None, left_col=None):
     if x1 - x0 < 10 or yb - y0 < 10:
         return []
     full = ink_mask(a[:, x0:x1])
-    while yb - 1 > y0 and (_contig(full[yb - 1], 0, x1 - x0 - 1) > 0.9 * (x1 - x0) or full[yb - 1].mean() > 0.9):  # 축선 위 번짐 행도 축선 (칸막이로 끊긴 축선 포함)
-        yb -= 1
+    yb0 = yb
+    while yb - 1 > y0 and yb0 - yb < 6 and (_contig(full[yb - 1], 0, x1 - x0 - 1) > 0.9 * (x1 - x0) or full[yb - 1].mean() > 0.9):  # 축선 위 번짐 행도 축선 (칸막이로 끊긴 축선 포함)
+        yb -= 1  # 6행까지만 — 그 위는 그림 폭 거의 전부를 덮은 맞붙은 막대(히스토그램)일 수 있음
     while x0 < x1 - 10 and _contig(ink_mask(a[y0:yb, x0:x0 + 1])[:, 0], 0, yb - y0 - 1) > 0.9 * (yb - y0):  # 세로축선 번짐 열
         x0 += 1
     sub = a[y0:yb, x0:x1]
@@ -359,7 +373,20 @@ def detect_bars(a, box, base_row, axis_rows=None, left_col=None):
         for s_, e_ in zip(cuts[:-1], cuts[1:]):
             if e_ - s_ >= 5:
                 split.append((s_, e_ - 1, k))
-    bars = sorted(split)
+    split2, parts = [], []
+    for l, r, k in split:
+        pc = _split_touching(sub, ink, g, l, r, h) if k == "fill" and r - l >= 16 else [(l, r)]
+        if len(pc) > 1:
+            parts.append(((l, r, k), pc))
+        else:
+            split2.append((l, r, k))
+    for whole, pc in parts:  # 다른 (안 나뉜) 막대가 나뉜 조각보다 훨씬 넓으면 나누지 않음 (범례·글자에 가린 막대 하나)
+        unit = float(np.median([e_ - s_ + 1 for s_, e_ in pc]))
+        if any(k_ == "fill" and r_ - l_ + 1 > 1.6 * unit for l_, r_, k_ in split2):
+            split2.append(whole)
+        else:
+            split2 += [(s_, e_, whole[2]) for s_, e_ in pc]
+    bars = sorted(split2)
     wmax = max(r - l + 1 for l, r, _ in bars)
     bars = [b for b in bars if b[1] - b[0] + 1 >= max(5, 0.3 * wmax)]
     out = []
@@ -381,6 +408,96 @@ def detect_bars(a, box, base_row, axis_rows=None, left_col=None):
         out.append(b)
     # 다른 막대를 품은 넓은 빈 '막대'(칸 틀)는 뺀다
     out = [b for b in out if not (b["open"] and any(o is not b and b["l"] <= o["l"] and o["r"] <= b["r"] for o in out))]
+    return _zero_bins(out, y0 + h)
+
+
+def _zero_bins(out, base):
+    """히스토그램(같은 폭 막대가 대부분 맞붙음): 막대 폭의 정수배인 빈 틈 = 높이 0 인 칸 → 값 0 막대로 채운다"""
+    if len(out) < 4:
+        return out
+    out = sorted(out, key=lambda b: b["l"])
+    ws = np.array([b["r"] - b["l"] for b in out], float)
+    w = float(np.median(ws))
+    if (np.abs(ws - w) > max(2.0, 0.08 * w)).any():
+        return out
+    gaps = [q["l"] - p["r"] for p, q in zip(out[:-1], out[1:])]
+    if sum(gp_ <= 2 for gp_ in gaps) < 0.6 * len(gaps):
+        return out
+    s0 = out[0]["segs"][0]["sig"]
+    if any(len(b["segs"]) != 1 or sig_dist(b["segs"][0]["sig"], s0) > 40 for b in out):
+        return out  # 히스토그램은 한 색 — 색이 다른 막대가 맞붙은 것은 묶음 막대
+    gi = [i for i, gp_ in enumerate(gaps) if gp_ > 2]
+    if len(gi) >= 2 and len({j - i for i, j in zip(gi[:-1], gi[1:])}) == 1 and gi[0] + 1 == gi[1] - gi[0]:
+        return out  # 일정한 간격마다 빈 틈 = 같은 색 묶음 막대의 묶음 사이
+    add = []
+    for p, gp_ in zip(out[:-1], gaps):
+        k = int(round(gp_ / w))
+        if k >= 1 and abs(gp_ - k * w) <= max(2.0, 0.1 * w):
+            for i in range(k):
+                l_ = p["r"] + gp_ * i / k
+                r_ = p["r"] + gp_ * (i + 1) / k
+                sg = {"y0": float(base), "y1": float(base), "sig": dict(p["segs"][0]["sig"])}
+                add.append({"l": l_, "r": r_, "cx": (l_ + r_) / 2, "open": False, "zero": True, "top_outer": base, "top_px": float(base),
+                            "segs": [sg], "err": {}, "w": r_ - l_})
+    return sorted(out + add, key=lambda b: b["l"])
+
+
+def _top_profile(ink, l, r, h):
+    """열마다 바닥에서 위로 이어진 잉크의 맨 위 행 (sub 좌표)"""
+    col = ink[:h, l:r + 1]
+    blank = ~col
+    # 바닥에서 위로 처음 만나는 빈 행 바로 아래 = 꼭대기
+    rev = blank[::-1]
+    first = np.where(rev.any(axis=0), rev.argmax(axis=0), h)
+    return (h - first).astype(float)
+
+
+def _split_touching(sub, ink, g, l, r, h):
+    """맞붙은 막대(히스토그램·간격 없는 막대) 나누기 → [(l, r)].
+    (1) 막대 사이 가는 세로 테두리선, (2) 꼭대기 높이가 계단처럼 바뀌는 곳, (3) 그렇게 나눈 막대 폭의 정수배인 조각은 똑같이 나눔.
+    무늬(세로 빗금)·글자 때문에 생긴 가짜 경계는 조각이 고르지 않으면 버린다."""
+    w = r - l + 1
+    top = _top_profile(ink, l, r, h)
+    hb = int(min(40, max(4, h - np.median(top) - 2)))
+    band = g[max(0, h - hb - 2):h - 2, l:r + 1].astype(float)
+    cm = band.mean(axis=0)
+    fill = float(np.median(cm))
+    cuts = set()
+    # (1) 가는 어두운 세로선 (막대 안쪽 3px 넘게 떨어진 곳)
+    darkc = (cm < fill - 40) & ((band < fill - 40).mean(axis=0) > 0.8)
+    for s_, e_ in D.runs(darkc):
+        if e_ - s_ + 1 <= 4 and s_ >= 4 and e_ <= w - 5:
+            cuts.add((s_ + e_ + 1) // 2)
+    # (2) 꼭대기 계단: 양쪽 6열이 평평하고 3px 넘게 차이
+    q = 6
+    best = {}
+    for c in range(q, w - q + 1):
+        L_, R_ = top[c - q:c], top[c:c + q]
+        if L_.max() - L_.min() <= 1.5 and R_.max() - R_.min() <= 1.5 and abs(np.median(L_) - np.median(R_)) >= 3:
+            best[c] = abs(np.median(L_) - np.median(R_))
+    for c in sorted(best):
+        if any(abs(c - o) < q for o in cuts):
+            continue
+        cuts.add(c)
+    if not cuts:
+        return [(l, r)]
+    edges = [0] + sorted(cuts) + [w]
+    pcs = [(a_, b_ - 1) for a_, b_ in zip(edges[:-1], edges[1:])]
+    ws = np.array([b_ - a_ + 1 for a_, b_ in pcs], float)
+    unit = float(np.min(ws[ws >= 0.6 * np.median(ws)])) if len(ws) else w
+    if ws.min() < 8 or ws.max() > 12 * unit:
+        return [(l, r)]
+    # 고른 폭인지: 각 조각이 단위 폭의 정수배(±15%)여야
+    ks = np.round(ws / unit)
+    if (np.abs(ws - ks * unit) > np.maximum(2.5, 0.15 * unit)).any():
+        return [(l, r)]
+    out = []
+    for (a_, b_), k in zip(pcs, ks):
+        k = int(k)
+        for i in range(k):
+            s_ = a_ + int(round(i * (b_ - a_ + 1) / k))
+            e_ = a_ + int(round((i + 1) * (b_ - a_ + 1) / k)) - 1
+            out.append((l + s_, l + e_))
     return out
 
 
@@ -393,11 +510,15 @@ def _measure(sub, ink, g, l, r, h):
     y = h - 1
     gap = 0
     top = None
+    solid = None  # 폭 전체를 잇거나 양 벽이 있는 맨 위 행
     while y >= 0:
         row = ink[y]
         # 막대 안: 폭 전체를 잇는 줄(테두리·채움) / 표본 띠에 잉크(무늬) / 양 벽이 다 있음(빈 막대)
-        if _contig(row, l, r) >= 0.85 * w or row[st].mean() >= 0.12 or (row[wl].any() and row[wr].any()):
+        full_ = _contig(row, l, r) >= 0.85 * w or (row[wl].any() and row[wr].any())
+        if full_ or row[st].mean() >= 0.12:
             top, gap = y, 0
+            if full_:
+                solid = y
         else:
             gap += 1
             if gap > 2:
@@ -405,6 +526,8 @@ def _measure(sub, ink, g, l, r, h):
         y -= 1
     if top is None or h - top < 1:
         return None
+    if solid is not None and top < solid and not ink[top:solid, l:r + 1].any(axis=1).all():
+        top = solid  # 빈 줄 너머 꼭대기에 붙은 글자(값 라벨)는 막대가 아님
     # 꼭대기 테두리: 맨 위(안티앨리어싱 한 행은 건너뜀)와 같은 색으로 이어지는 행들. 5행 넘으면 테두리 없는 채움
     rowcol = lambda yy: sub[yy, st].astype(float).mean(axis=0)
     dk = lambda yy: max(0.0, 255.0 - float(g[yy, st].mean()))
@@ -592,10 +715,15 @@ def _errbar(sub, ink, l, r, st, top, t_in, h, segs):
         y -= 1
         if len(run) > 0.95 * h:
             break
+    wide_rows = sum(1 for yy in run if ink[yy, st].mean() >= 0.3)
+    if len(run) >= 3 and run[0] >= top - 2 and wide_rows > max(4, 0.25 * len(run)):
+        run = []  # 가운데 줄기가 아니라 막대 폭 전체에 잉크(겹친 범례 상자·글자) — 오차 막대 아님
     if len(run) >= 3 and run[0] >= top - 2:
         ytop = run[-1]
         mid = run[len(run) // 2]
         stem = max(1, _contig(ink[mid], max(0, int(cx) - 3 * hw - 2), min(ink.shape[1] - 1, int(cx) + 3 * hw + 2)))
+        if stem > max(5, 0.25 * w):
+            return out  # 가는 줄기가 아님 (막대 꼭대기에 겹친 범례 견본·글자)
         capw = max(5, 2.5 * stem)
         cap = [yy for yy in range(ytop, min(top, ytop + 4)) if _contig(ink[yy], max(0, l - w // 2), min(ink.shape[1] - 1, r + w // 2)) >= capw]
         out["hi_px"] = float(np.mean(cap)) + 0.5 if cap else float(ytop)
@@ -622,8 +750,41 @@ def _errbar(sub, ink, l, r, st, top, t_in, h, segs):
     return out
 
 
-def find_bars(a, ax, orient=None):
+def _neg_bars(a, ax, orient):
+    """기준선(0) 반대쪽으로 뻗은 막대(음수): 그림을 값축 방향으로 뒤집어 같은 코드로 찾은 뒤 좌표를 되돌린다.
+    가로 막대는 기준선 왼쪽, 세로 막대는 기준선 아래. ax["neg_to"] = 그쪽 그림 영역 끝(없으면 그림 끝)."""
+    H, W = a.shape[:2]
+    xa, ya, box = ax["xaxis"], ax["yaxis"], ax["box"]
+    if orient == "h":
+        f = np.ascontiguousarray(a[:, ::-1])
+        far = float(ax.get("neg_to", 2))
+        bb = {"x0": box["y0"], "x1": box["y1"] - 1, "y0": far, "y1": float(ya["x"])}
+        bs = detect_bars(rot(f), bb, ya["c0"], left_col=box["y0"])
+        n = W
+    else:
+        f = np.ascontiguousarray(a[::-1])
+        far = float(ax.get("neg_to", H - 2))
+        bb = {"x0": box["x0"], "x1": box["x1"], "y0": H - far, "y1": H - float(xa["y"])}
+        bs = detect_bars(f, bb, H - 1 - xa["r1"], left_col=ya["c1"])
+        n = H
+    out = []
+    for b in bs:
+        if b.get("zero"):
+            continue
+        b["top_outer"], b["top_px"] = n - b["top_outer"], n - b["top_px"]
+        for sg in b["segs"]:
+            sg["y0"], sg["y1"] = n - sg["y0"], n - sg["y1"]
+        for k in ("hi_px", "lo_px"):
+            if b["err"].get(k) is not None:
+                b["err"][k] = n - b["err"][k]
+        b["neg"] = True
+        out.append(b)
+    return out
+
+
+def find_bars(a, ax, orient=None, two_sided=False):
     """축 검출 결과(digitize.detect_axes)로 세로·가로 막대를 찾는다. orient=None 이면 막대가 더 잘 서는 쪽.
+    two_sided=True 면 기준선 반대쪽(음수) 막대도 찾는다.
     → (orient 'v'|'h', 막대 목록 — 원래 그림 좌표로 바꾼 것)"""
     H, W = a.shape[:2]
     xa, ya, box = ax["xaxis"], ax["yaxis"], ax["box"]
@@ -639,7 +800,11 @@ def find_bars(a, ax, orient=None):
         return sum(1 for k in bs if k["r"] - k["l"] >= 5 and k["segs"] and k["segs"][0]["y0"] - k["top_px"] >= 3)
     if orient is None:
         orient = "h" if score(res.get("h", [])) > score(res.get("v", [])) else "v"
-    return orient, res.get(orient, [])
+    bs = res.get(orient, [])
+    if two_sided:
+        neg = [b for b in _neg_bars(a, ax, orient) if not any(min(b["r"], o["r"]) - max(b["l"], o["l"]) > 0.5 * (b["r"] - b["l"]) for o in bs)]
+        bs = sorted(bs + neg, key=lambda b: b["l"])
+    return orient, bs
 
 
 def value_px(orient, W, p):
@@ -752,11 +917,11 @@ def legend_patches(a, avoid=(), region=None):
     return out
 
 
-def analyze(a, ax, calib_val, orient=None):
+def analyze(a, ax, calib_val, orient=None, two_sided=False):
     """막대 검출 + 값 계산. calib_val = 값축 보정 {"p1": 픽셀, "p2": 픽셀, "v1", "v2", "log"} (픽셀은 값축 방향 좌표 하나).
     → {orient, bars: [{l, r, cx, top_px, value, segs: [{y0, y1, sig, top, value}], err}]}"""
     H, W = a.shape[:2]
-    orient, bs = find_bars(a, ax, orient)
+    orient, bs = find_bars(a, ax, orient, two_sided)
     f = (lambda v: math.log10(v)) if calib_val.get("log") else (lambda v: v)
     p1, p2 = float(calib_val["p1"]), float(calib_val["p2"])
     f1, f2 = f(calib_val["v1"]), f(calib_val["v2"])
@@ -823,6 +988,49 @@ def assign_series(bars, legend=()):
     return series
 
 
+def merge_washed(bars, n_legend):
+    """반투명 범례 상자에 가린 쌓인 막대 꼭대기: 맨 위 조각이 바로 아래 조각과 같은 색 방향의 옅은 색이고, 다른 막대에는 없는 채움이며,
+    찾은 채움 수가 범례(VLM) 항목 수보다 많으면 → 아래 조각에 붙인다. 붙인 막대 수를 돌려준다."""
+    if not n_legend or len(bars) < 3:
+        return 0
+    import copy
+    prov = assign_series(copy.deepcopy(bars))
+    if len(prov) <= n_legend:
+        return 0
+    n = 0
+    for b in bars:
+        if len(b["segs"]) < 2:
+            continue
+        t, u = b["segs"][-1], b["segs"][-2]
+        gt_, gu = (float(D.gray(np.array([[D.hex2rgb(x["sig"]["color"])]], float))[0, 0]) for x in (t, u))
+        if gt_ < gu + 25 or _absorb_cos(t["sig"]["color"], u["sig"]["color"]) < 0.95:
+            continue
+        others = [sg for o in bars if o is not b for sg in o["segs"]]
+        if any(sig_dist(sg["sig"], t["sig"]) < 70 for sg in others) or not any(sig_dist(sg["sig"], u["sig"]) < 70 for sg in others):
+            continue
+        u["y1"] = t["y1"]
+        b["segs"].pop()
+        n += 1
+    return n
+
+
+def one_series_by_color(bars, series, vlm_legend=None):
+    """범례 없는 색깔 막대: 범주마다 칠한 막대 하나(고른 간격, 쌓인 조각 없음)면 색은 범주 장식(범주별·양수/음수 색칠) → 한 계열로 본다.
+    계열로 나누면 표가 범주마다 한 칸만 찬 대각선이 된다. 묶음 막대(간격이 묶음마다 벌어짐)·쌓인 막대·범례가 있는 그림·빈 막대는 그대로."""
+    if len(series) < 2 or len(bars) < 3 or vlm_legend or any(s.get("legend") is not None for s in series):
+        return False
+    if any(len(b["segs"]) != 1 or b.get("zero") for b in bars):
+        return False
+    if any(b.get("open") or b["segs"][0]["sig"]["kind"] == "empty" for b in bars):
+        return False  # 테두리만 있는 빈 막대는 테두리 색이 계열을 뜻하는 경우가 많음 → 그대로
+    cs = sorted(b["cx"] for b in bars)
+    d = np.diff(cs)
+    ws = [b["r"] - b["l"] for b in bars]
+    if d.min() <= 0 or d.std() > 0.08 * d.mean() or d.min() - max(ws) < 0.15 * float(np.median(ws)):
+        return False  # 고르지 않은 간격(묶음) 또는 맞붙은 막대
+    return True
+
+
 def axis_break(a, ax):
     """값축이 끊긴 그래프(// 표시): 그림 영역 위쪽 바깥에, 틈을 두고 같은 세로축선이 다시 이어지면 끊김.
     → {"y": 끊긴 곳 픽셀, "side": "top"} 또는 None. (위 구간은 눈금이 달라 따로 보정해야 함)"""
@@ -884,3 +1092,114 @@ def slanted_labels(a, ax, bars):
     if slant < max(2, 0.5 * len(found)):
         return None
     return [found[j][:4] if j in found else None for j in range(len(bars))]
+
+
+# ── 값 라벨만 있는 막대 (값축 눈금 없음) ─────────────────────────────────────
+def label_axes(a, ax, orient):
+    """값 라벨로 보정할 때 쓸 그림 영역: 범주축선(막대가 서는 선)을 따라 넓힌 상자. 눈금 없는 웹 차트는 아래 가로축을 잘못 잡기 쉬움"""
+    H, W = a.shape[:2]
+    xa, ya = dict(ax["xaxis"]), dict(ax["yaxis"])
+    if orient == "h":
+        box = {"x0": float(ya["x"]), "x1": float(W - 2), "y0": float(ya["r0"]), "y1": float(ya["r1"])}
+        xa["y"] = box["y1"]
+        # 범주축선 아래 끝을 지나는 가는 가로선(바닥 축선)이 있으면 그 양 끝이 그림 영역 좌우 (막대가 0 양쪽으로 뻗는 그림)
+        g = D.gray(a)
+        y_ = int(round(ya["r1"]))
+        best = None
+        for yy in range(max(0, y_ - 3), min(H, y_ + 4)):
+            for s_, e_ in D.runs(g[yy] < 200):
+                if s_ <= ya["x"] <= e_ + 1 and e_ - s_ > 0.3 * W and (best is None or e_ - s_ > best[1] - best[0]):
+                    best = (s_, e_)
+        if best:
+            ax_ = dict(ax)
+            ax_["neg_to"] = float(best[0])
+            box["x1"] = float(best[1] + 1)
+            box["plot_x0"] = float(best[0])
+            return dict(ax_, box=box, xaxis=xa, yaxis=ya)
+    else:
+        box = {"x0": float(xa["c0"]), "x1": float(xa["c1"]), "y0": 2.0, "y1": float(xa["y"])}
+        ya["x"] = box["x0"]
+    return dict(ax, box=box, xaxis=xa, yaxis=ya)
+
+
+def value_label_boxes(a, bars, orient):
+    """막대 끝 바로 바깥(세로: 위, 가로: 오른쪽)에 찍힌 값 글자 상자 → 막대마다 [x0, y0, x1, y1](원래 그림 좌표) 또는 None"""
+    H, W = a.shape[:2]
+    s = a if orient == "v" else rot(a)
+    Hs, Ws = s.shape[:2]
+    dark = D.gray(s) < 170
+    out = []
+    for b in bars:
+        l, r, w = int(b["l"]), int(b["r"]), b["r"] - b["l"]
+        g = 3 if orient == "v" else max(7, int(0.25 * w))  # 글자 사이 틈 (가로 막대는 돌린 그림에서 낱말 사이 — '−€ 75.000')
+        c0, c1 = (max(0, int(l - 0.5 * w)), min(Ws, int(r + 0.5 * w))) if orient == "v" else (l, r)
+        d = 1 if b.get("neg") else -1  # 음수 막대는 끝이 기준선 반대쪽 → 그쪽으로 찾음
+        y = int(b["top_outer"]) - 1 if d < 0 else int(math.ceil(b["top_outer"]))
+        lim = max(0, int(b["top_outer"] - 0.4 * Hs)) if d < 0 else min(Hs - 1, int(b["top_outer"] + 0.4 * Hs))
+        start = None
+        gap = 0
+        first_gap = max(12, int(0.04 * Hs))
+        end = None
+        while (y >= lim) if d < 0 else (y <= lim):
+            has = dark[y, c0:c1].any()
+            if has:
+                if start is None:
+                    start = y
+                end, gap = y, 0
+            else:
+                gap += 1
+                if start is None and gap > first_gap:
+                    break
+                if start is not None and gap > g:
+                    break
+            y += d
+        if start is None or abs(start - end) + 1 < 3:
+            out.append(None)
+            continue
+        ra, rb = min(start, end), max(start, end)
+        cols = np.nonzero(dark[ra:rb + 1, c0:c1].any(axis=0))[0]
+        if len(cols) < 3:
+            out.append(None)
+            continue
+        bx = [c0 + int(cols[0]), ra, c0 + int(cols[-1]) + 1, rb + 1]
+        out.append([float(v) for v in (bx if orient == "v" else [W - bx[3], bx[0], W - bx[1], bx[2]])])
+    return out
+
+
+def fit_labels(pairs, base_px):
+    """(막대 끝 픽셀, 인쇄값) 짝 → 값축 직선. 막대가 0 에서 서는지(바닥선 = 0)도 맞으면 함께 쓴다. → (p1, v1, p2, v2, 잔차 px, 버린 짝) 또는 None"""
+    P = np.array([p for p, _ in pairs], float)
+    V = np.array([v for _, v in pairs], float)
+    dropped = []
+
+    def fit(P_, V_):
+        if len(P_) < 2 or np.ptp(V_) == 0:
+            return None
+        k, c = np.polyfit(V_, P_, 1)  # 픽셀 = k·값 + c
+        if k == 0:
+            return None
+        return k, c, float(np.abs(P_ - (k * V_ + c)).max())
+    while True:
+        best = None
+        P0, V0 = np.append(P, base_px), np.append(V, 0.0)
+        f0 = fit(P0, V0)
+        f1 = fit(P, V) if np.ptp(P) >= 15 else None
+        if f0 and f0[2] <= max(1.5, (f1[2] + 0.5) if f1 else 1.5):
+            best = f0
+        elif f1:
+            best = f1
+        if best is None:
+            return None
+        if best[2] <= 2.0 or len(P) <= 3:
+            break
+        k, c, _ = best
+        i = int(np.argmax(np.abs(P - (k * V + c))))
+        dropped.append((float(V[i]), float(P[i])))
+        P, V = np.delete(P, i), np.delete(V, i)
+    k, c, res = best
+    if res > 3.0:
+        return None
+    v1, v2 = 0.0, float(V[np.argmax(np.abs(V))])
+    if v2 == 0:
+        return None
+    return k * v1 + c, v1, k * v2 + c, v2, res, dropped

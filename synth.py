@@ -520,3 +520,125 @@ def bw_model_exp(dpi=150):
     ax.plot(xe, 100 * xe, ls="none", marker="o", mfc="white", mec="black", mew=1.5, ms=7, label="exp.")
     ax.legend(loc="upper left", frameon=False)
     return _mpl_truth(fig, ax, series, dpi=dpi)
+
+
+# ── 2026-10-20 막대 개선 시험용 (가로 막대·히스토그램·범례에 가린 누적·값 라벨만·음수·색깔 막대) ─────────────
+def bar_case(kind, dpi=100):
+    """참값을 아는 막대그래프. kind:
+    hbar_err   — 가로 막대 + 막대를 지나는 가로 오차 막대 (오차 줄이 축 상자로 잘못 잡히던 경우)
+    hbar_group — 가로 묶음 막대(두 색이 맞닿음) + 범례
+    hist       — 검은 테두리로 맞붙은 히스토그램 + 높이 0 인 칸, 숫자 x 눈금
+    hist_flat  — 테두리 없이 맞붙은 히스토그램(높이 계단으로만 나뉨)
+    stack_leg  — 누적 막대 꼭대기를 반투명 범례가 가림
+    labels_h   — 값축 눈금 없이 막대 끝에 값만 찍힌 가로 막대 (웹 차트 꼴)
+    neg_h      — 0 양쪽으로 뻗는 가로 막대 + 0 선 + 값 라벨 + 바닥 회색 선 (축선 없음)
+    neg_v      — 음수 세로 막대 (축선은 아래·왼쪽, 0 선 없음)
+    colors     — 범례 없이 막대마다 색이 다른 단순 막대 (+ 막대 꼭대기에 맞닿은 값 글자)
+    → (PNG, truth) truth = {orient, ticks, xticks, lim, xlim, bars: [{tops, series, err}], n_series, labels}"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    fig, ax = plt.subplots(figsize=(6.4, 4.4), dpi=dpi)
+    orient, ns, labels, xt = "v", 1, None, None
+    if kind == "hbar_err":
+        orient = "h"
+        v, e = [5.6, 5.5, 11.7, 10.6, 3.2], [0.9, 0.4, 0.9, 0.7, 0.3]
+        y = np.arange(5)
+        ax.barh(y, v, xerr=e, align="center")
+        ax.set_yticks(y, ["Tom", "Dick", "Harry", "Slim", "Jim"])
+        ax.invert_yaxis()
+        bars = [{"tops": [v[i]], "series": [0], "err": (v[i] - e[i], v[i] + e[i])} for i in range(5)]
+        bars = bars[::-1]  # 아래 → 위 순서로 (가로 막대 truth 는 아래부터, 검출은 위부터)
+    elif kind == "hbar_group":
+        orient = "h"
+        a1, a2 = [12, 15, 9, 20], [8, 11, 14, 10]
+        y = np.arange(4)
+        ax.barh(y - 0.2, a1, 0.4, label="2023")
+        ax.barh(y + 0.2, a2, 0.4, label="2024")
+        ax.set_yticks(y, ["Q1", "Q2", "Q3", "Q4"])
+        ax.legend(loc="lower right")
+        bars = []
+        for i in range(4):
+            bars += [{"tops": [a1[i]], "series": [0], "err": None}, {"tops": [a2[i]], "series": [1], "err": None}]
+        ns = 2
+    elif kind in ("hist", "hist_flat"):
+        cnt = [3, 0, 8, 21, 47, 80, 66, 30, 12, 5] if kind == "hist" else [4, 9, 22, 40, 33, 18, 7]
+        edges = np.linspace(-2.5, 2.5, len(cnt) + 1)
+        w = edges[1] - edges[0]
+        ax.bar(edges[:-1] + w / 2, cnt, w, edgecolor="black" if kind == "hist" else None, color="#1f77b4", lw=1)
+        bars = [{"tops": [float(c)], "series": [0], "err": None, "c": float(edges[i] + w / 2)} for i, c in enumerate(cnt)]
+        xt = None  # 그린 뒤 x 범위 안 눈금만 (아래)
+    elif kind == "stack_leg":
+        data = np.array([[30, 20, 5], [28, 22, 8], [25, 23, 12], [22, 24, 17]], float)
+        bottom = np.zeros(4)
+        cols = ["#1f77b4", "#ff7f0e", "#2ca02c"]
+        for j in range(3):
+            ax.bar(range(4), data[:, j], 0.6, bottom=bottom, color=cols[j], edgecolor="black", label=["coal", "gas", "solar"][j])
+            bottom += data[:, j]
+        ax.set_xticks(range(4), ["2019", "2020", "2021", "2022"])
+        ax.legend(loc="upper right", framealpha=0.8)
+        bars = [{"tops": list(np.cumsum(r)), "series": [0, 1, 2], "err": None} for r in data]
+        ns = 3
+    elif kind == "labels_h":
+        orient = "h"
+        v = [84.7, 83.7, 82.2, 81.0, 77.0]
+        y = np.arange(5)[::-1]
+        ax.barh(y, v, 0.65, color="#6d87b0")
+        for yy, x in zip(y, v):
+            ax.text(x + 0.8, yy, f"{x:g} years", va="center", fontsize=9, color="#555555")
+        ax.set_yticks(y, ["Japan", "South Korea", "France", "Germany", "United States"])
+        ax.set_xticks([])
+        for sp in ("top", "right", "bottom"):
+            ax.spines[sp].set_visible(False)
+        ax.spines["left"].set_color("#cccccc")
+        ax.set_xlim(0, 100)
+        bars = [{"tops": [x], "series": [0], "err": None} for x in v][::-1]
+        labels = v
+    elif kind == "neg_h":
+        orient = "h"
+        v = [125000, -75000, -275000, -475000]
+        y = np.arange(4)[::-1]
+        ax.barh(y, v, 0.6, color=["#2a78d6" if x > 0 else "#e34948" for x in v])
+        ax.axvline(0, color="black", lw=1)
+        for yy, x in zip(y, v):
+            ax.text(x + (8000 if x > 0 else -8000), yy, f"{'+' if x > 0 else '−'}€ {abs(x) // 1000}.000", va="center",
+                    ha="left" if x > 0 else "right", fontsize=9)
+        ax.set_yticks(y, ["Arbeid", "Studie", "Gezin", "Asiel"])
+        ax.set_xlim(-650000, 300000)
+        ax.set_xticks([-400000, -200000, 0, 200000], ["−400.000", "−200.000", "0", "+200.000"])
+        for sp in ("top", "right", "left"):
+            ax.spines[sp].set_visible(False)
+        ax.spines["bottom"].set_color("#999999")
+        ax.tick_params(length=0)
+        bars = [{"tops": [float(x)], "series": [0], "err": None} for x in v][::-1]
+        labels = v
+    elif kind == "neg_v":
+        v = [4.0, -2.5, 6.5, -5.0, 1.5]
+        ax.bar(range(5), v, 0.6, color="#4c72b0")
+        ax.set_xticks(range(5), ["A", "B", "C", "D", "E"])
+        ax.set_ylim(-6, 8)
+        bars = [{"tops": [x], "series": [0], "err": None} for x in v]
+    elif kind == "colors":
+        v = [100, 88, 97, 85, 90]
+        cs = ["#4f81bc", "#c0504f", "#9bbb59", "#8165a2", "#4aacc5"]
+        ax.bar(range(5), v, 0.7, color=cs)
+        for i, x in enumerate(v):
+            ax.text(i, x + 0.3, f"{x} ± 2", ha="center", va="bottom", fontsize=10)
+        ax.set_xticks(range(5), ["TCP", "A", "B", "C", "316L"])
+        ax.set_ylim(0, 105)
+        bars = [{"tops": [float(x)], "series": [0], "err": None} for x in v]
+    else:
+        raise ValueError(kind)
+    fig.tight_layout()
+    lim = ax.get_ylim() if orient == "v" else ax.get_xlim()
+    tk = ax.get_yticks() if orient == "v" else ax.get_xticks()
+    tk = [float(t) for t in tk if min(lim) - 1e-9 <= t <= max(lim) + 1e-9]
+    xlim = [float(x) for x in ax.get_xlim()]
+    if kind in ("hist", "hist_flat"):
+        xt = [float(t) for t in ax.get_xticks() if min(xlim) <= t <= max(xlim)]
+    b = io.BytesIO()
+    fig.savefig(b, format="png", dpi=dpi)
+    plt.close(fig)
+    return b.getvalue(), {"orient": orient, "ticks": tk, "xticks": xt, "lim": [float(x) for x in lim], "xlim": xlim, "bars": bars,
+                          "n_series": ns, "labels": labels}

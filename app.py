@@ -454,6 +454,32 @@ def _unique_cats(bars):
             b["cat"] = f"{b['cat']} ({k[b['cat']]})"
 
 
+def label_calib(a, ax, orient, model=None, two_sided=False):
+    """값축 눈금 없이 막대 끝에 값만 찍힌 막대그래프: 막대 끝 바깥 값 글자를 하나씩 VLM 으로 읽고 (막대 끝 픽셀, 값) 짝으로 값축을 맞춘다.
+    좌표는 여전히 픽셀 측정 — VLM 은 글자만 읽는다. → (넓힌 축 정보, pair_axis 꼴 보정, 안내 문장) 또는 None"""
+    H, W = a.shape[:2]
+    ax2 = B.label_axes(a, ax, orient)
+    _, bs = B.find_bars(a, ax2, orient, two_sided)
+    if len(bs) < 2:
+        return None
+    boxes = B.value_label_boxes(a, bs, orient)
+    idx = [i for i, b in enumerate(boxes) if b]
+    if len(idx) < 2:
+        return None
+    vals = vlm_read_blobs(a, [boxes[i] for i in idx], model) or []
+    pairs = [(B.value_px(orient, W, bs[i]["top_px"]), v) for i, v in zip(idx, vals) if v is not None]
+    if len(pairs) < 2:
+        return None
+    base = ax2["yaxis"]["x"] if orient == "h" else ax2["xaxis"]["y"]
+    f = B.fit_labels(pairs, base)
+    if not f:
+        return None
+    p1, v1, p2, v2, res, dropped = f
+    c = {"p1": float(p1), "p2": float(p2), "v1": v1, "v2": v2, "log": False, "resid_px": res, "dropped": dropped,
+         "n": len(pairs) - len(dropped), "ambiguous": False, "source": "labels"}
+    return ax2, c, f"값축 눈금이 없거나 위치를 못 찾아 막대 끝에 찍힌 값 {len(pairs) - len(dropped)}개로 값축을 맞췄습니다(잔차 {res:.1f}px) — 인쇄값이 반올림돼 있으면 그만큼 오차가 납니다"
+
+
 def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta=None, orient=None, use_vlm=True):
     """막대그래프: 값축만 보정(눈금 값 짝짓기) + 막대·쌓인 조각·오차 막대 검출 + 범례 견본 짝짓기 + (VLM) 범주·계열 이름.
     → {"ok", "orient", "calib", "fit", "bars", "series", "warn"} 또는 {"ok": False, "error"}. 막대 위치는 픽셀(원본 좌표)."""
@@ -488,19 +514,46 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
             c["source"] = "ticks"
             opts.append(c)
     name = "y" if orient == "v" else "x"
+    two_sided = bool(vals) and min(vals) < 0 < max(vals)  # 눈금에 음수가 있으면 기준선(0) 양쪽으로 뻗은 막대
+    lab_note = None
+    if not opts and use_vlm:  # 값축 눈금이 없음 → 막대 끝에 찍힌 값으로 보정
+        try:
+            lc = label_calib(a, ax, orient, model, two_sided)
+        except Exception:
+            lc = None
+        if lc:
+            ax, c, lab_note = lc
+            bx = ax["box"]
+            opts.append(c)
     if not opts:
         return {"ok": False, "orient": orient,
                 "error": f"막대그래프로 보이지만 값축({name}축) 눈금 숫자를 읽지 못했습니다 — 'AI 없이' 칸에 {name} 눈금 값을 넣거나 수동 보정하세요"}
     fit = min(opts, key=lambda c: (c["resid_px"] >= 1.5, c["ambiguous"], -c["n"], c["resid_px"]))
     cv = {"p1": fit["p1"], "p2": fit["p2"], "v1": fit["v1"], "v2": fit["v2"], "log": fit["log"]}
-    an = B.analyze(a, ax, cv, orient)
+    if two_sided and lab_note is None:  # 기준선을 0 의 픽셀 위치로 (축선이 아래·왼쪽 끝에 있어도 막대는 0 에서 뻗음)
+        z = fit["p1"] + (0 - fit["v1"]) * (fit["p2"] - fit["p1"]) / (fit["v2"] - fit["v1"]) if not fit["log"] and fit["v2"] != fit["v1"] else None
+        if z is not None:
+            zi = int(round(z))
+            if orient == "v" and bx["y0"] + 3 < z < bx["y1"] - 3:
+                ax = dict(ax, xaxis=dict(ax["xaxis"], y=float(z), r0=zi, r1=zi - 1), neg_to=bx["y1"])
+            elif orient == "h" and bx["x0"] + 3 < z < bx["x1"] - 3:
+                ax = dict(ax, yaxis=dict(ax["yaxis"], x=float(z), c0=zi, c1=zi - 1), neg_to=bx["x0"])
+    an = B.analyze(a, ax, cv, orient, two_sided)
+    if not cv["log"] and cv["v2"] != cv["v1"]:  # 히스토그램 빈 칸(높이 0)은 값 0 의 픽셀에
+        z = cv["p1"] + (0 - cv["v1"]) * (cv["p2"] - cv["p1"]) / (cv["v2"] - cv["v1"])
+        for b in an["bars"]:
+            if b.get("zero"):
+                zp = z if orient == "v" else W - z
+                b["top_px"] = zp
+                for sg in b["segs"]:
+                    sg["y0"] = sg["y1"] = zp
     raster_solid=False
     if orient=='v' and ax.get('synth_y'):
         import layout
         measured=layout.measure_bars(a,bx)
         if len(measured)>=8 and len(layout.solid_palette(a,bx))>=2:
             an['bars']=measured;raster_solid=True
-    warn = []
+    warn = [lab_note] if lab_note else []
     if raster_solid:warn.append("누적 조각은 픽셀 색 경계에서 측정했습니다. 1픽셀보다 얇은 조각은 판독이 제한됩니다.")
     if fit["resid_px"] > 1.5:
         warn.append(f"{name}축 눈금 값과 위치가 잘 안 맞습니다 (잔차 {fit['resid_px']:.1f}px) — 확인하세요")
@@ -544,7 +597,15 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
                     pats.append(p)
         except (OSError, ValueError):
             pa = None
+    nw = B.merge_washed(an["bars"], len((v or {}).get("legend") or []))
+    if nw:
+        warn.append(f"반투명 범례에 가려 옅게 보이는 맨 위 조각 {nw}개는 바로 아래 조각과 같은 계열로 붙였습니다 — 확인하세요")
     series = B.assign_series(an["bars"], pats)
+    if B.one_series_by_color(an["bars"], series, (v or {}).get("legend")):
+        series = [dict(series[0], legend=None, n=len(an["bars"]))]
+        for b in an["bars"]:
+            b["segs"][0]["series"] = 0
+        warn.append("범례가 없고 범주마다 막대가 하나뿐이라, 막대 색이 달라도 한 계열(범주별 색칠)로 봤습니다 — 색이 계열을 뜻하면 표에서 나눠 쓰세요")
     names = {}
     used = sorted({s["legend"] for s in series if s["legend"] is not None})
     if use_vlm and used:
@@ -579,10 +640,16 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
     bars = []
     for i, b in enumerate(an["bars"]):
         e = b["err"]
-        bars.append({"cat": f"막대 {i + 1}", "group": "", "c": b["cx"], "w": [b["l"], b["r"]], "base": base,
+        bars.append({"cat": f"막대 {i + 1}", "group": "", "c": b["cx"], "w": [b["l"], b["r"]], "base": base, **({"zero": True} if b.get("zero") else {}),
                      "ends": [conv(sg["y1"]) for sg in b["segs"]], "series": [sg["series"] for sg in b["segs"]],
                      "err": [conv(e["hi_px"]), conv(e["lo_px"]) if e.get("lo_px") is not None else None] if e.get("hi_px") is not None else None,
                      "open": b["open"]})
+    nz = sum(1 for b in bars if b.get("zero"))
+    if nz:
+        for b in bars:
+            if b.get("zero"):
+                b["note"] = "높이 0 (빈 칸)"
+        warn.append(f"맞붙은 막대(히스토그램) 사이 빈 칸 {nz}개는 높이 0 인 막대로 넣었습니다 — 확인하세요")
     numeric_categories=False
     if orient=='v' and (v or {}).get('x_ticks') and lb.get('x'):
         xf=D.pair_axis(v['x_ticks'],lb['x'],tk['x'],majors=tk['x_major'],log=False)
@@ -592,6 +659,8 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
                 if abs(value-round(value))<.08:value=round(value)
                 b['cat']=f"{value:g}"
             numeric_categories=True
+            # 숫자 범주축(히스토그램·연도): 범주축도 숫자로 보정해 둔다 (막대 위치 → 값). 값축은 그대로 y
+            calib["x"] = {"p1": [float(xf["p1"]), xa["y"]], "p2": [float(xf["p2"]), xa["y"]], "v1": float(xf["v1"]), "v2": float(xf["v2"]), "log": False}
             # Physical x ticks with invisible subpixel bars still identify a category;
             # values stay empty, never invented as zeros.
             if raster_solid and len(tk['x'])>len(bars) and len(tk['x'])<=len(bars)+3:
@@ -640,8 +709,11 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
             b.pop("key")
     _unique_cats(bars)
     nerr = sum(1 for b in bars if b["err"])
-    return {"ok": True, "orient": orient, "calib": calib, "fit": {name: fit}, "bars": bars, "series": out_series, "warn": warn,
-            "legend_src": src, "n_err": nerr}
+    out = {"ok": True, "orient": orient, "calib": calib, "fit": {name: fit}, "bars": bars, "series": out_series, "warn": warn,
+           "legend_src": src, "n_err": nerr}
+    if lab_note:  # 값 라벨로 보정할 때 다시 잡은 그림 영역
+        out["box"] = {"x0": bx.get("plot_x0", bx["x0"]), "y0": bx["y0"], "x1": bx["x1"], "y1": bx["y1"]}
+    return out
 
 
 def deskew_image(iid):
@@ -788,7 +860,9 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
     vt = (v or {}).get("chart_type", "")
     xv = xvals or (v or {}).get("x_ticks") or []
     yv = yvals or (v or {}).get("y_ticks") or []
-    want_bar = chart in ("bar", "vbar", "hbar") or (chart == "auto" and vt in ("bar", "hbar") and nb > 0)
+    vv = (xv if vt == "hbar" else yv) or []
+    neg_ticks = bool(vv) and min(vv) < 0 < max(vv)  # 0 양쪽으로 뻗는 막대는 축선에 닿지 않아 nb 가 0 일 수 있음
+    want_bar = chart in ("bar", "vbar", "hbar") or (chart == "auto" and vt in ("bar", "hbar") and (nb > 0 or vt == "hbar" or neg_ticks))
     why = ""
     if not want_bar and (xv or each.get("x")) and (yv or each.get("y")):
         full = D.auto_calibrate(a, xv, yv, None, None, each, {"x": xlog, "y": ylog}, box_hint=hint)
@@ -813,6 +887,8 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
             res["mode"] = "bar"
             det["calib"] = br["calib"]
             det["fit"] = None
+            if br.get("box"):
+                det["box"] = br["box"]
             det["warn"] = list(det.get("warn") or []) + br["warn"]
             nseg = sum(len(b["ends"]) for b in br["bars"])
             res["message"] = (why + f"막대 {len(br['bars'])}개 ({'세로' if br['orient'] == 'v' else '가로'}), 조각 {nseg}개, "

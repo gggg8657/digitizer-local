@@ -600,6 +600,75 @@ try:
         assert g2["kind"] == "points" and 9 <= len(g2["px"]) <= 11 and e2 < 1.0, ("exp.", g2["kind"], len(g2["px"]), e2)
         ROWS.append(("같은색-선/표식", "model·exp.", len(g2["px"]), corner_err(r, tr), float("nan"), max(e1, e2), None))
 
+    if app._has("matplotlib"):
+        # 2026-10-20 막대: 가로 막대(오차 줄·맞닿은 두 색)·히스토그램(맞붙음·높이 0 칸)·범례에 가린 누적·값 라벨만·음수·색깔 막대
+        _vlb, _rb = B.value_label_boxes, app.vlm_read_blobs
+        seen = {}
+
+        def vlb(*a_, **k_):
+            out_ = _vlb(*a_, **k_)
+            seen["boxes"] = [b_ for b_ in out_ if b_]
+            return out_
+        B.value_label_boxes = vlb
+        try:
+            for kind in ("hbar_err", "hbar_group", "hist", "hist_flat", "stack_leg", "labels_h", "neg_h", "neg_v", "colors"):
+                png, tr = S.bar_case(kind)
+                if OUT:
+                    open(os.path.join(OUT, f"bar2_{kind}.png"), "wb").write(png)
+                seen.clear()
+
+                def rb(a_, boxes, model=None, tr=tr):  # 가짜 글자 읽기: 값 라벨 상자면 참 인쇄값(위 → 아래 / 왼 → 오른), 눈금 덩어리는 못 읽음
+                    if tr["labels"] and boxes == seen.get("boxes"):
+                        key = 1 if tr["orient"] == "h" else 0
+                        order = sorted(range(len(boxes)), key=lambda i: boxes[i][key])
+                        vals = [None] * len(boxes)
+                        for rank, i in enumerate(order):
+                            vals[i] = float(tr["labels"][rank])
+                        return vals
+                    return None
+                app.vlm_read_blobs = rb
+                legend = {"hbar_group": [{"name": "2023", "color": "#1f77b4"}, {"name": "2024", "color": "#ff7f0e"}],
+                          "stack_leg": [{"name": n_, "color": c_} for n_, c_ in (("coal", "#1f77b4"), ("gas", "#ff7f0e"), ("solar", "#2ca02c"))]}.get(kind, [])
+                vk = "x_ticks" if tr["orient"] == "h" else "y_ticks"
+                main = {vk: tr["ticks"], "chart_type": "hbar" if tr["orient"] == "h" else "bar", "legend": legend}
+                if tr["xticks"]:
+                    main["x_ticks"] = tr["xticks"]
+                app.chat_vision = vlm_with(main)
+                info = app.save_image(png)
+                r = app.auto(info["id"])
+                br = r.get("bar") or {}
+                assert not r["need_panel"] and r["mode"] == "bar" and br.get("ok") and br["orient"] == tr["orient"], (kind, r["message"])
+                truth = tr["bars"][::-1] if tr["orient"] == "h" else tr["bars"]
+                assert len(br["bars"]) == len(truth), f"{kind}: 막대 {len(br['bars'])}개 (참 {len(truth)}개)"
+                lo_, hi_ = (0.0, max(t["tops"][-1] for t in truth)) if not tr["ticks"] else tr["lim"]
+                span = abs(hi_ - lo_)
+                errs, smap = [], {}
+                for b, t in zip(br["bars"], truth):
+                    tops, err = app.bar_values(br["calib"], b, br["orient"])
+                    assert len(tops) == len(t["tops"]), f"{kind}: 조각 {[round(x, 2) for x in tops]} (참 {t['tops']})"
+                    errs += [abs(x - y) / span * 100 for x, y in zip(tops, t["tops"])]
+                    for gt, got in zip(t["series"], b["series"]):
+                        assert smap.setdefault(gt, got) == got, f"{kind}: 계열 섞임"
+                    assert bool(t["err"]) == bool(err), f"{kind}: 오차 막대 {err} (참 {t['err']})"
+                    if err:
+                        errs += [abs(err[0] - t["err"][1]) / span * 100, abs(err[1] - t["err"][0]) / span * 100]
+                assert len(br["series"]) == tr["n_series"], f"{kind}: 계열 {len(br['series'])}개 (참 {tr['n_series']})"
+                mx = max(errs)
+                assert mx <= 2.0, f"{kind}: 막대 값 오차 {mx:.2f}%"
+                if kind.startswith("hist"):  # 숫자 범주축도 보정 → 막대 가운데 x 값
+                    cx = br["calib"]["x"]
+                    assert not cx.get("cat"), f"{kind}: x 범주축이 숫자로 보정되지 않음"
+                    xe = max(abs(D.to_data(br["calib"], [b["c"]], [0])[0][0] - t["c"]) for b, t in zip(br["bars"], truth))
+                    assert xe < 0.02 * (tr["xlim"][1] - tr["xlim"][0]), f"{kind}: 막대 위치 x 오차 {xe:.3f}"
+                if kind == "hist":
+                    assert sum(1 for b in br["bars"] if b.get("zero")) == 1, f"{kind}: 높이 0 칸"
+                if tr["labels"]:
+                    assert any("찍힌 값" in w for w in br["warn"]), (kind, br["warn"])
+                ROWS.append((f"막대2-{kind}", f"{len(br['series'])}계열", sum(len(b["ends"]) for b in br["bars"]),
+                             abs(br["fit"]["y" if tr["orient"] == "v" else "x"]["resid_px"]), float(np.sqrt(np.mean(np.square(errs)))), mx, None))
+        finally:
+            B.value_label_boxes, app.vlm_read_blobs = _vlb, _rb
+
     # 기울어진 스캔(1.5°): 축선 각도로 바로 세우고 결과에 각도를 남김
     png, tr = S.pillow_plot([dict(name="sin", color=(31, 119, 180), kind="line", x=xs, y=np.sin(xs)),
                              dict(name="cos", color=(214, 39, 40), kind="line", x=xs, y=0.6 * np.cos(xs))],
