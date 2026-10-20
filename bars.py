@@ -141,9 +141,9 @@ def _find_panels(a, min_frac=0.06, tilt=False):
         if not seg.any() or float(np.median(sat_[r, s0:e0 + 1][seg])) < 80:
             return True
         col = seg & (sat_[r, s0:e0 + 1] >= 80)
-        k = int(t) + 3
-        up = sat_[max(0, r - k), s0:e0 + 1] >= 80
-        dn = sat_[min(H - 1, r + k), s0:e0 + 1] >= 80
+        k = int(t) + max(6, int(0.01 * H))  # 굵은 색 곡선(4~6px)은 이만큼 떨어지면 색이 없음 — 막대 채움은 이어짐
+        up = (sat_[max(0, r - k):r, s0:e0 + 1] >= 80).all(axis=0)  # 위(또는 아래)로 k 행 내내 색 = 칠한 면
+        dn = (sat_[r + 1:min(H, r + k + 1), s0:e0 + 1] >= 80).all(axis=0)
         return float((col & (up | dn)).sum()) >= 0.5 * col.sum()
     hs = [l for l in hs if achro(l)]
     cands = []
