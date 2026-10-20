@@ -525,6 +525,23 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
             ax, c, lab_note = lc
             bx = ax["box"]
             opts.append(c)
+    relative = None
+    if not opts and not vals and not each.get(k) and len(lb.get(k) or []) < 2:
+        # 값축 숫자(눈금 글자 덩어리)도 값 라벨도 없음 → 상대값 (가장 높은 격자선 = 100, 없으면 가장 높은 막대 = 100).
+        # 글자 덩어리는 있는데 못 읽은 것이면 상대값으로 넘어가지 않고 실패를 알린다.
+        base_ = ax["xaxis"]["y"] if orient == "v" else ax["yaxis"]["x"]
+        gr = B.grid_rows(a, bx, base_) if orient == "v" else []
+        ref, how = (gr[0], "grid") if gr else (None, "bar")
+        if ref is None:
+            pv = {"p1": base_, "p2": base_ - 100 if orient == "v" else base_ + 100, "v1": 0.0, "v2": 100.0, "log": False}
+            an0 = B.analyze(a, ax, pv, orient, False)
+            tops = [(b["top_px"] if orient == "v" else W - b["top_px"]) for b in an0["bars"]]
+            if tops:
+                ref = min(tops) if orient == "v" else max(tops)
+        if ref is not None and abs(ref - base_) > 5:
+            opts.append({"p1": float(base_), "p2": float(ref), "v1": 0.0, "v2": 100.0, "log": False, "resid_px": 0.0, "n": 2,
+                         "ambiguous": False, "pairs": [], "dropped": [], "source": "relative"})
+            relative = {"ref": how, "ref_px": float(ref), "base_px": float(base_), "grid": [float(y) for y in gr]}
     if not opts:
         return {"ok": False, "orient": orient,
                 "error": f"막대그래프로 보이지만 값축({name}축) 눈금 숫자를 읽지 못했습니다 — 'AI 없이' 칸에 {name} 눈금 값을 넣거나 수동 보정하세요"}
@@ -539,6 +556,11 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
             elif orient == "h" and bx["x0"] + 3 < z < bx["x1"] - 3:
                 ax = dict(ax, yaxis=dict(ax["yaxis"], x=float(z), c0=zi, c1=zi - 1), neg_to=bx["x0"])
     an = B.analyze(a, ax, cv, orient, two_sided)
+    if relative and orient == "v" and any(b["top_px"] <= bx["y0"] + 4 for b in an["bars"]):  # 그림 영역 위로 삐져나온 막대(격자선보다 높음): 위를 넓혀 다시 잼
+        y0n = max(0.0, bx["y0"] - 0.5 * (ax["xaxis"]["y"] - bx["y0"]))
+        ax = dict(ax, box=dict(bx, y0=y0n), yaxis=dict(ax["yaxis"], r0=int(y0n)))
+        bx = ax["box"]
+        an = B.analyze(a, ax, cv, orient, two_sided)
     if not cv["log"] and cv["v2"] != cv["v1"]:  # 히스토그램 빈 칸(높이 0)은 값 0 의 픽셀에
         z = cv["p1"] + (0 - cv["v1"]) * (cv["p2"] - cv["p1"]) / (cv["v2"] - cv["v1"])
         for b in an["bars"]:
@@ -548,12 +570,15 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
                 for sg in b["segs"]:
                     sg["y0"] = sg["y1"] = zp
     raster_solid=False
-    if orient=='v' and ax.get('synth_y'):
+    if orient=='v' and ax.get('synth_y') and not relative:  # 상대값(눈금 없음)은 맞붙은 묶음 막대를 누적 조각으로 재지 않음
         import layout
         measured=layout.measure_bars(a,bx)
         if len(measured)>=8 and len(layout.solid_palette(a,bx))>=2:
             an['bars']=measured;raster_solid=True
     warn = [lab_note] if lab_note else []
+    if relative:
+        warn.insert(0, "값축 숫자가 없어 상대값(" + ("가장 높은 격자선=100" if relative["ref"] == "grid" else "가장 높은 막대=100")
+                    + ")으로 뽑았습니다 — 실제 값은 눈금 두 개를 직접 넣어 보정하세요")
     if raster_solid:warn.append("누적 조각은 픽셀 색 경계에서 측정했습니다. 1픽셀보다 얇은 조각은 판독이 제한됩니다.")
     if fit["resid_px"] > 1.5:
         warn.append(f"{name}축 눈금 값과 위치가 잘 안 맞습니다 (잔차 {fit['resid_px']:.1f}px) — 확인하세요")
@@ -709,9 +734,11 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
             b.pop("key")
     _unique_cats(bars)
     nerr = sum(1 for b in bars if b["err"])
+    if relative:
+        calib[name]["relative"] = True
     out = {"ok": True, "orient": orient, "calib": calib, "fit": {name: fit}, "bars": bars, "series": out_series, "warn": warn,
-           "legend_src": src, "n_err": nerr}
-    if lab_note:  # 값 라벨로 보정할 때 다시 잡은 그림 영역
+           "legend_src": src, "n_err": nerr, "relative": relative}
+    if lab_note or relative:  # 값 라벨로 보정할 때(또는 상대값에서 위를 넓혔을 때) 다시 잡은 그림 영역
         out["box"] = {"x0": bx.get("plot_x0", bx["x0"]), "y0": bx["y0"], "x1": bx["x1"], "y1": bx["y1"]}
     return out
 
@@ -837,6 +864,22 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
                         v[k + "_ticks_each"] = per
         except Exception as e:
             res["error"] = f"VLM 읽기 실패 — 눈금 값을 직접 넣어 주세요 ({e})"
+    # 칸막이 그래프(값축 y 를 같이 쓰는 칸들)인데 x 눈금이 칸마다 되풀이됨(0…8, 0…8, …) → x 가 다른 그래프들: 칸마다 고르게 함
+    pb = plots[0].get("part_boxes") if len(plots) == 1 and not meta.get("plot") and not whole else None
+    xt0 = [x for x in ((v or {}).get("x_ticks_each") or (v or {}).get("x_ticks") or []) if x is not None]
+    if pb and len(xt0) >= 2 * len(pb) and sum(1 for p_, q_ in zip(xt0, xt0[1:]) if q_ < p_) == len(pb) - 1:
+        ps = []
+        for i, b_ in enumerate(pb):
+            ps.append({"box": b_, "kind": "plot", "why": f"y축을 같이 쓰는 칸 {i + 1}/{len(pb)}" + (" (y 눈금은 왼쪽 칸에서 빌림)" if i else ""),
+                       "share_y": i > 0, "score": (b_[2] - b_[0]) * (b_[3] - b_[1]),
+                       "crop": B._crop_for(a, b_, [o for o in pb if o is not b_])})
+        res["panels"] = ps + [p_ for p_ in panels if p_["kind"] != "plot"]
+        res["need_panel"] = True
+        res["vlm"] = v
+        res["message"] = sk_note + (f"y축을 같이 쓰는 그래프 {len(pb)}칸을 찾았습니다(x 눈금이 칸마다 따로) — 아래 목록에서 하나를 고르세요. "
+                                    "안쪽 칸은 y 눈금을 왼쪽 칸에서 빌려 씁니다.")
+        res["detect"] = {"ok": False, "error": res["message"]}
+        return res
     doubt = None
     if not force and chart == "auto":
         vt0 = (v or {}).get("chart_type")
@@ -864,6 +907,14 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
     neg_ticks = bool(vv) and min(vv) < 0 < max(vv)  # 0 양쪽으로 뻗는 막대는 축선에 닿지 않아 nb 가 0 일 수 있음
     want_bar = chart in ("bar", "vbar", "hbar") or (chart == "auto" and vt in ("bar", "hbar") and (nb > 0 or vt == "hbar" or neg_ticks))
     why = ""
+    if not want_bar and (xv or each.get("x")) and not (yv or each.get("y")) and meta.get("plot") and meta.get("parent"):
+        try:
+            full = _borrow_y(a, meta, xv, each, xlog, hint, model)
+        except Exception as e:
+            full = None
+            det.setdefault("warn", []).append(f"왼쪽 칸의 y 눈금을 빌리지 못했습니다 ({e})")
+        if full:
+            det = full
     if not want_bar and (xv or each.get("x")) and (yv or each.get("y")):
         full = D.auto_calibrate(a, xv, yv, None, None, each, {"x": xlog, "y": ylog}, box_hint=hint)
         # VLM 이 말한 로그 여부와 잔차로 고른 결과가 다르면 경고 (결정은 잔차·눈금 모양)
@@ -893,9 +944,18 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
             nseg = sum(len(b["ends"]) for b in br["bars"])
             res["message"] = (why + f"막대 {len(br['bars'])}개 ({'세로' if br['orient'] == 'v' else '가로'}), 조각 {nseg}개, "
                               f"계열 {len(br['series'])}개, 오차 막대 {br['n_err']}개를 찾았습니다. 결과 탭의 표를 확인하세요.")
+            if br.get("relative"):
+                res["relative"] = True
+                res["message"] += (" 값축 숫자가 없어 상대값(" + ("가장 높은 격자선=100" if br["relative"]["ref"] == "grid" else "가장 높은 막대=100")
+                                   + ")으로 뽑았습니다 — 실제 값은 눈금 두 개를 직접 넣어 보정하세요.")
         else:
             res["mode"] = "bar"
             res["message"] = why + br["error"]
+    if det.get("calib") and v and use_vlm:
+        try:
+            _multiplier(a, det, v, model)
+        except Exception as e:
+            det.setdefault("warn", []).append(f"축 배수(×10ⁿ) 확인 실패 ({e})")
     if not res["message"]:
         if det.get("calib"):
             res["message"] = "축 보정을 마쳤습니다 — 화면의 X1·X2·Y1·Y2 위치를 확인하고 데이터 탭에서 추출하세요."
@@ -925,6 +985,12 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
             c2 = det["calib2"]["y"]
             det.setdefault("warn", []).append(f"오른쪽 y축({c2['v1']:g}…{c2['v2']:g})이 따로 있습니다 — 범례에서 오른쪽 축이라고 읽은 계열은 오른쪽 눈금으로 바꿨습니다. "
                                               "다른 계열도 데이터 탭에서 '오른쪽 y축'을 켜고 끌 수 있습니다.")
+    if sig.get("colorbar"):
+        det["colorbar"] = sig["colorbar"]
+    ins = plots[0].get("insets") if len(plots) == 1 else None
+    if ins and det.get("calib"):
+        det["insets"] = ins
+        det.setdefault("warn", []).append(f"그래프 안의 삽입 그래프 {len(ins)}개는 자동 추출에서 뺐습니다 — 삽입 그래프 값이 필요하면 ✂ 자르기로 그 영역만 고르세요")
     if res["mode"] == "xy" and det.get("calib") and (use_vlm or xvals or yvals):
         det["series"] = extract_all(a, det, chart_type=vt)
         got = [s for s in det["series"] if s.get("px")]
@@ -938,6 +1004,79 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
         res["message"] = sk_note + res["message"]
     res["detect"] = det
     return res
+
+
+def _borrow_y(a, meta, xv, each, xlog, hint, model=None):
+    """칸막이 그래프의 안쪽 칸(y 눈금 글자 없음): 원본에서 같은 높이의 왼쪽 첫 칸을 찾아 그 칸의 y 보정을 빌린다.
+    → 이 그림 좌표의 auto_calibrate 결과(calib 포함) 또는 None"""
+    par = image(meta["parent"])
+    bx, pl = meta["box"], meta["plot"]
+    me = [pl[0] + bx[0], pl[1] + bx[1], pl[2] + bx[0], pl[3] + bx[1]]
+    grp = None
+    for p in B.find_panels(par):
+        for i, b_ in enumerate(p.get("part_boxes") or []):
+            if i and all(abs(u - w) <= 4 for u, w in zip(b_, me)):
+                grp = p["part_boxes"]
+    if not grp:
+        return None
+    left = grp[0]
+    cr = [int(round(float(v))) for v in B._crop_for(par, left, [o for o in grp if o is not left])]
+    sub = np.ascontiguousarray(par[cr[1]:cr[3], cr[0]:cr[2]])
+    lh = dict(zip(("x0", "y0", "x1", "y1"), [left[0] - cr[0], left[1] - cr[1], left[2] - cr[0], left[3] - cr[1]]))
+    d0 = D.auto_calibrate(sub, None, None, box_hint=lh)
+    if not d0.get("ok"):
+        return None
+    v0 = vlm_read(sub, d0, model)
+    e0 = {}
+    yb = d0["labels"]["y_boxes"][::-1]
+    if 2 <= len(yb) <= 30:
+        per = vlm_read_blobs(sub, yb, model)
+        if per and sum(q is not None for q in per) >= 2:
+            e0["y"] = per
+    d1 = D.auto_calibrate(sub, v0.get("x_ticks") or [], v0.get("y_ticks") or [], None, None, e0, {"y": v0.get("y_log")}, box_hint=lh, partial=True)
+    fy = (d1.get("_fits") or {}).get("y")
+    if not fy:
+        return None
+    full = D.auto_calibrate(a, xv, None, None, None, each, {"x": xlog}, box_hint=hint, partial=True)
+    fx = (full.get("_fits") or {}).get("x")
+    if not fx or not full.get("ok"):
+        return None
+    dy = cr[1] - bx[1]  # 왼쪽 칸 그림 행 → 이 그림 행
+    ax = full["axes"]
+    full["calib"] = {"x": {"p1": [fx["p1"], ax["xaxis"]["y"]], "p2": [fx["p2"], ax["xaxis"]["y"]], "v1": fx["v1"], "v2": fx["v2"], "log": fx["log"]},
+                     "y": {"p1": [ax["yaxis"]["x"], fy["p1"] + dy], "p2": [ax["yaxis"]["x"], fy["p2"] + dy], "v1": fy["v1"], "v2": fy["v2"], "log": fy["log"],
+                           "shared": True}}
+    full["fit"] = {"x": fx, "y": dict(fy, source="shared")}
+    full.pop("_fits", None)
+    full["warn"].append("이 칸에는 y 눈금 글자가 없어 같은 높이의 왼쪽 칸 y 눈금으로 보정했습니다 (y축 공유)")
+    return full
+
+
+def vlm_read_mult(a, boxes, model=None):
+    """축 모서리 글자 조각들을 그대로 옮겨 적게 함 → 글자 목록 (배수 꼴 판단은 multiplier.parse)"""
+    import multiplier as M
+    imgs = []
+    for b in boxes:
+        h = max(1, b[3] - b[1])
+        imgs.append(_crop_png(a, b, scale=max(1.0, min(4.0, 48.0 / h))))
+    j = parse_json(chat_vision(M.PROMPT, [x for x in imgs if x], model))
+    t = j.get("texts") if isinstance(j.get("texts"), dict) else j
+    return [str(t.get(str(i + 1)) or "") for i in range(len(boxes))]
+
+
+def _multiplier(a, det, v, model=None):
+    """축 배수(×10ⁿ)를 찾아 보정 값에 곱하고 det["multiplier"] = {x·y: 지수, text, src} 를 남긴다"""
+    import multiplier as M
+    m = M.find(a, det, v, lambda im, boxes: vlm_read_mult(im, boxes, model))
+    done = M.apply(det["calib"], m)
+    if done:
+        det["multiplier"] = {**done, "text": {k: m["text"][k] for k in done}, "src": {k: m["src"][k] for k in done}}
+        if m.get("box"):
+            det["multiplier"]["box"] = {k: m["box"][k] for k in done if k in m["box"]}
+        for k, n in done.items():
+            det.setdefault("warn", []).append(f"{k}축 배수 ×10^{n} ('{m['text'][k]}', {'축 이름' if m['src'][k] == 'label' else '축 끝 글자'})를 "
+                                              "눈금 값에 곱했습니다 — 눈금 숫자에 이미 들어 있었다면 보정 값을 고치세요")
+    return det.get("multiplier")
 
 
 def right_axis(a, det, v, model=None):
@@ -1006,7 +1145,7 @@ def extract_all(a, det, chart_type=""):
     calib, box = det["calib"], det["box"]
     if (det.get("axes") or {}).get("roi_y0") is not None:  # 축선 없는 웹 차트: 맨 위 격자선 위로 넘친 데이터까지 추출
         box = dict(box, y0=min(box["y0"], det["axes"]["roi_y0"]))
-    legends = det.get("legend_boxes")
+    legends = list(det.get("legend_boxes") or []) + [list(b) for b in det.get("insets") or []]  # 범례 상자·삽입 그래프는 추출에서 뺌
     out = []
     named = any(s.get("name") and not s["name"].startswith("계열 ") for s in det.get("series") or [])
     W = box["x1"] - box["x0"]
@@ -1090,6 +1229,16 @@ def extract_all(a, det, chart_type=""):
     for i, s in enumerate(out):
         if not s.get("name"):
             s["name"] = f"계열 {i + 1}"
+    import noise
+    try:
+        out = noise.clean(a, det, out, chart_type, det.get("colorbar"))
+    except Exception as e:
+        det.setdefault("warn", []).append(f"잡음 계열 정리 실패 ({e})")
+    import hidden
+    try:
+        out = hidden.fill(det, out)
+    except Exception as e:
+        det.setdefault("warn", []).append(f"가린 구간 보간 실패 ({e})")
     return out
 
 
@@ -1111,6 +1260,16 @@ def series_data(calib, s):
         return []
     xs, ys = D.to_data(calib, [p[0] for p in px], [p[1] for p in px])
     return sorted([[float(f"{x:.12g}"), float(f"{y:.12g}")] for x, y in zip(xs, ys)])
+
+
+def interp_flags(s):
+    """계열 점마다 '보간됨'(다른 선에 가려 채운 점) 여부 — series_data 와 같은 순서 (x 값 순)"""
+    px = s.get("px") or []
+    sp = s.get("interp") or []
+    if not px or not sp:
+        return [False] * len(px)
+    fl = [any(a_ - 0.5 <= p[0] <= b_ + 0.5 for a_, b_ in sp) for p in px]
+    return fl
 
 
 def fmt_num(v):
@@ -1151,18 +1310,25 @@ def export(calib, series, fmt="csv", meta=None, bars=None, orient="v"):
             ws_.append(head)
             for r in rows:
                 ws_.append([None if v == "" else v for v in r])
-            for name, d in cols:
+            for ci, (name, d) in enumerate(cols):
                 sh = wb.create_sheet(re.sub(r"[\[\]:*?/\\]", "_", name)[:31] or "계열")
-                sh.append(["범주", "계열", "아래 끝", "위 끝", "조각 값"] if bars else ["x", "y"])
+                fl = None
+                if not bars and ci < len(series) and series[ci].get("interp"):  # 다른 선에 가려 보간한 점 표시
+                    s_ = series[ci]
+                    xs_ = D.to_data(s_.get("calib") or calib, [p[0] for p in s_["px"]], [p[1] for p in s_["px"]])[0]
+                    fl = {round(float(x), 9): f for x, f in zip(xs_, interp_flags(s_))}
+                sh.append(["범주", "계열", "아래 끝", "위 끝", "조각 값"] if bars else ["x", "y"] + (["보간됨"] if fl else []))
                 for r in d:
-                    sh.append(list(r))
+                    sh.append(list(r) + ((["보간" if fl.get(round(float(r[0]), 9)) else ""]) if fl else []))
             info = wb.create_sheet("보정")
             for k in ("x", "y"):
                 c = calib[k]
                 if c.get("cat"):
                     info.append([f"{k}축", "범주축 (막대 위치)"])
                     continue
-                info.append([f"{k}축", "로그" if c.get("log") else "선형", "점1(px)", *c["p1"], "값1", c["v1"], "점2(px)", *c["p2"], "값2", c["v2"]])
+                info.append([f"{k}축", "로그" if c.get("log") else "선형", "점1(px)", *c["p1"], "값1", c["v1"], "점2(px)", *c["p2"], "값2", c["v2"]]
+                            + (["상대값 (실제 값 아님: 가장 높은 격자선 또는 막대 = 100)"] if c.get("relative") else [])
+                            + ([f"배수 ×10^{c['mult']} 적용"] if c.get("mult") else []))
             for k, v in (meta or {}).items():
                 if isinstance(v, (str, int, float)):
                     info.append([k, v])
@@ -1225,6 +1391,9 @@ def bar_table(calib, bars, series, orient="v"):
         r["tops"].append(tops[-1] if tops else "")
         if err:
             r["err"][b["series"][-1]] = [err[0] - tops[-1], tops[-1] - err[1]]
+    if (calib.get("y" if orient == "v" else "x") or {}).get("relative"):  # 값축 숫자 없는 그림: 상대값임을 머리글에
+        nm0 = nm
+        nm = lambda j: f"{nm0(j)} (상대값)"  # noqa: E731
     head = ["범주"] + [nm(j) for j in used] + (["막대 끝(합계)"] if stacked else []) + [f"{nm(j)} 오차 {c}" for j in err_s for c in "+−"]
     out = [[r["cat"]] + [r["seg"].get(j, "") for j in used] + ([r["tops"][0] if len(r["tops"]) == 1 else ""] if stacked else [])
            + [v for j in err_s for v in r["err"].get(j, ["", ""])] for r in rows]

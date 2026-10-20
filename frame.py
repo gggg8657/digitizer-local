@@ -168,12 +168,20 @@ def grid_extent(a):
     gx = [l[0] for l in vl if x0 + 2 < l[0] < x1 - 1]
     top_line = y0
     if len(vl) < 2:  # 맨 위 격자선 위로 조금 넘친 데이터(웹 차트)도 담게 위를 띄움 — 위 글자(부제목) 바로 아래까지만
-        neutral = (g < 160) & (sat < 40)
-        lim = int(max(0, y0 - max(6, 0.06 * (y1 - y0))))
+        # 겹친 색 선의 번짐(파랑+갈색 → 회색)은 글자가 아님: 색 픽셀 2px 둘레는 뺀다
+        col = sat >= 40
+        cd = col.copy()
+        for k in (1, 2):
+            cd[k:] |= col[:-k]
+            cd[:-k] |= col[k:]
+            cd[:, k:] |= col[:, :-k]
+            cd[:, :-k] |= col[:, k:]
+        neutral = (g < 200) & (sat < 40) & ~cd  # 글자 획 둘레(옅은 번짐)까지 — 색 마스크에 글자 가장자리가 섞이지 않게
+        lim = int(max(0, y0 - max(6, 0.12 * (y1 - y0))))
         yt = lim
         for y in range(int(y0) - 3, lim - 1, -1):
             if neutral[y, int(x0) + 2:int(x1) - 1].any():
-                yt = y + 3
+                yt = y + 4
                 break
         roi_y0 = float(min(y0, max(yt, lim)))
     else:

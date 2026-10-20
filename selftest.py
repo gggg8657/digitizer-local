@@ -669,6 +669,112 @@ try:
         finally:
             B.value_label_boxes, app.vlm_read_blobs = _vlb, _rb
 
+    if app._has("matplotlib"):
+        # 2026-10-20 잡음·논문 그림: 배수(×10ⁿ)·위첨자 로그 눈금 하나·가린 구간 보간·범례 없는 잡음 계열·컬러바 산점·칸막이 y 공유·선 끝 이름 색
+        import multiplier as M
+
+        def vlm_m(main, corner=""):
+            def f(prompt, images, model=None):
+                if prompt == M.PROMPT:
+                    return json.dumps({"texts": {str(i + 1): corner for i in range(len(images))}})
+                if "numbered row" in prompt:
+                    return json.dumps({"labels": {}})
+                return json.dumps(main)
+            return f
+        for kind in ("mult_offset", "mult_label"):
+            png, tr = S.noise_case(kind)
+            app.chat_vision = vlm_m({"x_ticks": tr["xticks"], "y_ticks": tr["yticks_printed"], "chart_type": "line", "legend": [],
+                                     "y_label": tr.get("y_label", "")}, tr.get("mult_text", ""))
+            r = app.auto(app.save_image(png)["id"])
+            d = r["detect"]
+            assert d.get("multiplier") and d["multiplier"]["y"] == (-5 if kind == "mult_offset" else 3), (kind, d.get("multiplier"), d.get("warn"))
+            ce = corner_err(r, tr)
+            e, cov, g = ser_err(r, d["series"][0]["name"], tr["series"][0])
+            assert ce < 0.5 and e < 1.0 and cov > 0.9, (kind, ce, e, cov)
+            ROWS.append((f"배수-{kind}", f"×10^{d['multiplier']['y']}", len(g["px"]), ce, float("nan"), e, None))
+        assert M.parse("x 10^-15", True) == -15 and M.parse("(×10³)") == 3 and M.parse("1e5", True) == 5 and M.parse("m^3/s") is None and M.parse("1e5") is None
+        png, tr = S.noise_case("log_one")
+        app.chat_vision = vlm_m({"x_ticks": tr["xticks"], "y_ticks": [10], "y_scale": "log", "chart_type": "line", "legend": []})
+        r = app.auto(app.save_image(png)["id"])
+        assert r["detect"]["calib"] and r["detect"]["calib"]["y"]["log"] and r["detect"]["fit"]["y"]["source"] == "log_one", r["message"]
+        ce = corner_err_log = max(abs(math.log10(a_ / b_)) for a_, b_ in zip(
+            D.to_data(r["detect"]["calib"], [tr["box"]["x0"]] * 2, [tr["box"]["y1"], tr["box"]["y0"]])[1],
+            D.to_data(tr["calib"], [tr["box"]["x0"]] * 2, [tr["box"]["y1"], tr["box"]["y0"]])[1])) / math.log10(34 / 2.6) * 100
+        assert ce < 0.6, ("로그 글자 하나", ce)
+        ROWS.append(("로그-글자하나(10¹)", "k", 13, corner_err_log, float("nan"), 0.0, None))
+        png, tr = S.noise_case("occluded")
+        app.chat_vision = vlm_m({"x_ticks": [1, 10, 100, 1000], "y_ticks": tr["yticks"], "x_scale": "log", "chart_type": "line",
+                                 "legend": [{"name": "Wright", "color": "#1f77b4", "style": "line"}, {"name": "Plateau", "color": "#ff7f0e", "style": "line"}]})
+        r = app.auto(app.save_image(png)["id"])
+        g = next(x for x in r["detect"]["series"] if x["name"] == "Wright")
+        dd = np.asarray(app.series_data(r["detect"]["calib"], g))
+        assert g.get("interp") and dd[:, 0].min() < 1.2 and dd[:, 0].max() > 50, (g.get("interp"), dd[:, 0].min(), dd[:, 0].max(), g.get("warn"))
+        ey = max(abs(y - 100 * x ** -0.32) for x, y in dd) / 85 * 100
+        assert ey < 1.5, ("가린 구간 값", ey)
+        fl = app.interp_flags(g)
+        assert any(fl) and not all(fl)
+        ROWS.append(("가린구간-보간", "Wright", len(dd), 0.0, float("nan"), ey, None))
+        for kind, n_pts in (("halo", None), ("bubbles", 20)):
+            png, tr = S.noise_case(kind)
+            app.chat_vision = vlm_m({"x_ticks": tr["xticks"], "y_ticks": tr["yticks"], "chart_type": "scatter" if n_pts else "line", "legend": []})
+            r = app.auto(app.save_image(png)["id"])
+            got = [x for x in r["detect"]["series"] if x.get("px")]
+            assert len(got) == 1, (kind, [(x["color"], x.get("kind"), len(x["px"])) for x in got], r["detect"].get("warn"))
+            if n_pts:
+                assert abs(len(got[0]["px"]) - n_pts) <= 2, (kind, len(got[0]["px"]))
+            ROWS.append((f"잡음정리-{kind}", got[0]["color"], len(got[0]["px"]), corner_err(r, tr), float("nan"), 0.0, None))
+        png, tr = S.colorbar_scatter()
+        app.chat_vision = vlm_m({"x_ticks": tr["xticks"], "y_ticks": tr["yticks"], "chart_type": "scatter", "legend": []})
+        r = app.auto(app.save_image(png)["id"])
+        got = [x for x in r["detect"]["series"] if x.get("px")]
+        assert len(got) == 1 and len(got[0]["px"]) >= 27 and any("컬러바" in w for w in got[0]["warn"]), [(x["color"], len(x["px"])) for x in got]
+        ROWS.append(("컬러바-산점-한계열", "pts", len(got[0]["px"]), corner_err(r, tr), float("nan"), 0.0, None))
+        # 선 끝 이름표(웹 차트): 범례 색이 비슷한 두 갈색 — 차례로 고르면 엇갈림, 거리 합 최소로 짝
+        m = D.match_legend([{"name": "Nigeria", "color": "#b34d2d"}, {"name": "India", "color": "#4c78a8"}, {"name": "South Korea", "color": "#a6611a"}],
+                           [{"color": "#996d39"}, {"color": "#4c6a9c"}, {"color": "#b13507"}])
+        assert [(x["name"], x["color"]) for x in m] == [("Nigeria", "#b13507"), ("India", "#4c6a9c"), ("South Korea", "#996d39")], m
+        # 칸막이 1×3 (y 공유): 칸마다 고르게 → 안쪽 칸은 왼쪽 칸 y 눈금을 빌림
+        png, tr = S.noise_case("sharey")
+        app.chat_vision = vlm_m({"x_ticks": tr["xticks"], "y_ticks": tr["yticks"], "chart_type": "line", "legend": []})
+        info = app.save_image(png)
+        r = app.auto(info["id"])
+        assert r["need_panel"] and len([p_ for p_ in r["panels"] if p_["kind"] == "plot"]) == 3, r["message"]
+        inner = {}
+        _m1 = vlm_m({"x_ticks": tr["xticks1"], "y_ticks": tr["yticks"], "chart_type": "line", "legend": []})
+        _m0 = vlm_m({"x_ticks": tr["xticks1"], "y_ticks": [], "chart_type": "line", "legend": []})
+        app.chat_vision = lambda prompt, images, model=None: (_m0 if _Im.open(io.BytesIO(images[0])).size == inner.get("size") else _m1)(prompt, images, model)
+        for i, p_ in enumerate([p_ for p_ in r["panels"] if p_["kind"] == "plot"]):
+            ci = app.crop_image(info["id"], p_["crop"], p_["box"])
+            inner["size"] = (ci["w"], ci["h"]) if i else None  # 안쪽 칸 그림엔 y 글자가 없음 (가짜 VLM 도 y 눈금을 못 읽음)
+            r2 = app.auto(ci["id"])
+            cy = r2["detect"]["calib"]["y"]
+            assert bool(cy.get("shared")) == bool(i), (i, cy)
+            g = [x for x in r2["detect"]["series"] if x.get("px")][0]
+            dd = np.asarray(app.series_data(r2["detect"]["calib"], g))
+            ty = tr["series"][i]["y"]
+            e = max(min(np.hypot(x - xt, y - yt) for xt, yt in zip(range(10), ty)) for x, y in dd) / 9.4 * 100
+            assert e < 1.5, (i, e)
+            ROWS.append((f"y공유칸-{i + 1}", "빌림" if i else "직접", len(dd), 0.0, float("nan"), e, None))
+        app.chat_vision = vlm_m({})
+        # 값축 숫자 없는 묶음 막대: 상대값(가장 높은 격자선 = 100), 범례 색 점으로 3계열
+        png, tr = S.relative_bars()
+        app.chat_vision = vlm_m({"x_ticks": [], "y_ticks": [], "chart_type": "bar",
+                                 "legend": [{"name": n_, "color": c_} for n_, c_ in zip(tr["names"], tr["colors"])]})
+        r = app.auto(app.save_image(png)["id"])
+        br = r["bar"]
+        assert r["mode"] == "bar" and br["ok"] and br.get("relative") and r.get("relative") and br["calib"]["y"].get("relative"), r["message"]
+        assert "상대값" in r["message"] and len(br["bars"]) == 36 and len(br["series"]) == 3, (r["message"], len(br["bars"]), len(br["series"]))
+        errs = []
+        smap = {}
+        for b, t in zip(br["bars"], tr["bars"]):
+            v_ = app.bar_values(br["calib"], b, "v")[0][-1]
+            errs.append(abs(v_ - t["v"]))
+            assert smap.setdefault(t["s"], b["series"][0]) == b["series"][0], "계열 섞임"
+        assert max(errs) < 2.0, max(errs)
+        head, rows_, _ = app.bar_table(br["calib"], br["bars"], br["series"], "v")
+        assert all("상대값" in h_ for h_ in head[1:]), head
+        ROWS.append(("상대값-묶음막대", "3계열", 36, 0.0, float("nan"), max(errs), None))
+
     # 기울어진 스캔(1.5°): 축선 각도로 바로 세우고 결과에 각도를 남김
     png, tr = S.pillow_plot([dict(name="sin", color=(31, 119, 180), kind="line", x=xs, y=np.sin(xs)),
                              dict(name="cos", color=(214, 39, 40), kind="line", x=xs, y=0.6 * np.cos(xs))],

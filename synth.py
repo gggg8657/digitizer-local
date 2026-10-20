@@ -642,3 +642,141 @@ def bar_case(kind, dpi=100):
     plt.close(fig)
     return b.getvalue(), {"orient": orient, "ticks": tk, "xticks": xt, "lim": [float(x) for x in lim], "xlim": xlim, "bars": bars,
                           "n_series": ns, "labels": labels}
+
+
+# ── 2026-10-20 잡음·논문 그림 개선 시험용 ─────────────────────────────────────
+def noise_case(kind, dpi=100):
+    """참값을 아는 그림. kind:
+    mult_offset — y 값이 1e-5 자릿수: matplotlib 이 눈금은 0…2.5, 축 위 끝에 '1e−5' 배수 글자를 따로 찍음
+    mult_label  — 눈금은 0…8, 축 이름에 '(×10³)' 배수
+    log_one     — 로그 y 축에 숫자 글자가 10¹ 하나뿐 (나머지는 작은 눈금)
+    occluded    — 선 A 의 왼쪽 절반이 같은 경로의 선 B 밑에 완전히 가림 (A 는 범례에 있음)
+    halo        — 범례 없는 검은 곡선 하나 + 회색 격자 (번짐·격자를 계열로 잡지 않아야 함)
+    bubbles     — 범례 없는 반투명 거품(크기 여러 개) 산점 한 계열 (채움·테두리·겹친 색이 계열로 갈라지지 않아야 함)
+    sharey      — y축을 같이 쓰는 1×3 칸 (안쪽 칸엔 y 글자 없음, x 눈금은 칸마다 0…8)
+    → (PNG, 참값 dict: calib, box, series, xticks, yticks, ...)"""
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    xs = np.linspace(0, 10, 200)
+    if kind == "mult_offset":
+        s = [dict(name="decay", color="#1f77b4", kind="line", x=xs, y=2.4e-5 * np.exp(-xs / 4))]
+        fig, ax = plt.subplots(figsize=(7, 4.8), dpi=dpi)
+        ax.plot(xs, s[0]["y"], color="#1f77b4")
+        ax.set_ylim(0, 2.6e-5)
+        p, t = _mpl_truth(fig, ax, s, dpi=dpi)
+        t["yticks_printed"] = [round(v * 1e5, 6) for v in t["yticks"]]
+        t["mult_text"] = "1e-5"
+        return p, t
+    if kind == "mult_label":
+        s = [dict(name="load", color="#d62728", kind="line", x=xs, y=4000 + 3000 * np.sin(xs / 2))]
+        fig, ax = plt.subplots(figsize=(7, 4.8), dpi=dpi)
+        ax.plot(xs, s[0]["y"] / 1000, color="#d62728")
+        ax.set_ylim(0, 8)
+        ax.set_ylabel("Load (×10³ N)")
+        p, t = _mpl_truth(fig, ax, s, dpi=dpi)
+        t["calib"]["y"].update(v1=t["calib"]["y"]["v1"] * 1000, v2=t["calib"]["y"]["v2"] * 1000)
+        t["yticks_printed"] = [float(v) for v in t["yticks"]]
+        t["yticks"] = [v * 1000 for v in t["yticks"]]
+        t["y_label"] = "Load (×10³ N)"
+        return p, t
+    if kind == "log_one":
+        x = np.arange(300, 1501, 100)
+        s = [dict(name="k", color="#1f77b4", kind="line", x=x, y=30 * np.exp(-(x - 300) / 600))]
+        fig, ax = plt.subplots(figsize=(6, 4.5), dpi=dpi)
+        ax.plot(x, s[0]["y"], "o-", color="#1f77b4")
+        ax.set_yscale("log")
+        ax.set_ylim(2.6, 34)
+        ax.tick_params(which="both", direction="in", right=True, top=True)
+        p, t = _mpl_truth(fig, ax, s, ylog=True, dpi=dpi)
+        t["yticks"] = [10.0]
+        return p, t
+    if kind == "occluded":
+        x = np.logspace(0, 3, 300)
+        ya = 100 * x ** -0.32
+        yb = np.where(x < 10, ya, 100 * 10 ** -0.32)
+        s = [dict(name="Wright", color="#1f77b4", kind="line", x=x[x <= 60], y=ya[x <= 60]),
+             dict(name="Plateau", color="#ff7f0e", kind="line", x=x, y=yb)]
+        fig, ax = plt.subplots(figsize=(8, 5), dpi=dpi)
+        ax.plot(x, ya, color="#1f77b4", lw=1.6, label="Wright")
+        ax.plot(x, yb, color="#ff7f0e", lw=1.6, label="Plateau")  # 나중에 그려 위에 덮음
+        ax.set_xscale("log")
+        ax.set_ylim(25, 110)
+        ax.legend(loc="upper right")
+        return _mpl_truth(fig, ax, s, xlog=True, dpi=dpi)
+    if kind == "halo":
+        rng = np.random.default_rng(5)
+        y = np.cumsum(rng.normal(0, 1, 200))
+        s = [dict(name="walk", color="#000000", kind="line", x=xs, y=y)]
+        fig, ax = plt.subplots(figsize=(9.6, 4), dpi=dpi)
+        ax.plot(xs, y, color="black", lw=1)
+        ax.grid(True, alpha=0.4)
+        ax.set_title("random walk")
+        return _mpl_truth(fig, ax, s, dpi=dpi)
+    if kind == "bubbles":
+        rng = np.random.default_rng(11)
+        x, y = rng.uniform(15, 100, 20), rng.uniform(0, 48, 20)
+        s = [dict(name="pts", color="#e67d7e", kind="points", x=x, y=y)]
+        fig, ax = plt.subplots(figsize=(7.68, 5.76), dpi=dpi)
+        ax.scatter(x, y, s=rng.uniform(40, 400, 20), color="tab:red", alpha=0.6, edgecolors="black")
+        return _mpl_truth(fig, ax, s, dpi=dpi)
+    if kind == "sharey":
+        fig, axs = plt.subplots(1, 3, figsize=(11, 3.7), dpi=dpi, sharey=True)
+        xi = np.arange(10)
+        truth = []
+        for i, (ax, c) in enumerate(zip(axs, ("#1f77b4", "#ff7f0e", "#2ca02c"))):
+            yi = (xi * (0.4 + 0.3 * i)) % 9
+            ax.plot(xi, yi, "o-", color=c)
+            truth.append(dict(name=f"p{i}", color=c, kind="line", x=xi, y=yi))
+        fig.tight_layout()
+        fig.canvas.draw()
+        H = fig.canvas.get_width_height()[1]
+        boxes = []
+        for ax in axs:
+            bb = ax.get_window_extent()
+            boxes.append([bb.x0, H - bb.y1, bb.x1, H - bb.y0])
+        b = io.BytesIO()
+        fig.savefig(b, format="png", dpi=dpi)
+        y0, y1 = axs[0].get_ylim()
+        x0, x1 = axs[0].get_xlim()
+        xt = [float(t) for t in axs[0].get_xticks() if x0 <= t <= x1]
+        yt = [float(t) for t in axs[0].get_yticks() if y0 <= t <= y1]
+        plt.close(fig)
+        return b.getvalue(), {"series": truth, "boxes": boxes, "xlim": (x0, x1), "ylim": (y0, y1),
+                              "xticks": xt * 3, "xticks1": xt, "yticks": yt}
+    raise ValueError(kind)
+
+
+def relative_bars(size=(680, 450)):
+    """값축 숫자·값 라벨 없는 묶음 세로 막대(월 × 3계열, 맞붙은 세 색), 연한 가로 격자, 아래 색 점 범례 (Pillow).
+    참값: 격자 간격 = 20, 가장 높은 격자선 = 100 → 막대 높이(상대값)"""
+    W, H = size
+    im = Image.new("RGB", size, (250, 250, 250))
+    d = ImageDraw.Draw(im)
+    fn = _font(12)
+    x0, x1, base, top = 44, 636, 326, 158
+    for k in range(1, 6):
+        y = base - k * (base - top) / 5
+        d.line([(x0, y), (x1, y)], fill=(225, 225, 225), width=1)
+    d.line([(x0, base), (x1, base)], fill=(150, 150, 150), width=1)
+    cols = [(251, 29, 167), (252, 211, 24), (107, 29, 172)]
+    vals = [[90, 46, 24], [42, 91, 51], [42, 91, 69], [42, 110, 39], [24, 46, 55], [68, 50, 39],
+            [69, 80, 15], [118, 86, 64], [24, 69, 89], [68, 106, 46], [34, 65, 79], [95, 56, 27]]
+    gw = (x1 - x0) / 12
+    bars = []
+    for m, vs in enumerate(vals):
+        for j, v in enumerate(vs):
+            l = x0 + 6 + m * gw + j * 14
+            h = v / 100 * (base - top)
+            d.rectangle([l, base - h, l + 13, base - 1], fill=cols[j])
+            bars.append({"m": m, "s": j, "v": v, "c": l + 7})
+        d.text((x0 + 6 + m * gw + 21, base + 8), f"{m + 1}월", fill=(40, 40, 40), font=fn, anchor="mt")
+    for j, nm in enumerate(("팝", "재즈", "록")):
+        cx = 190 + j * 110
+        d.ellipse([cx - 8, 362, cx + 8, 378], fill=cols[j])
+        d.text((cx + 14, 370), nm, fill=(40, 40, 40), font=fn, anchor="lm")
+    d.text((W // 2, 92), "인기 음악", fill=(0, 0, 0), font=_font(26), anchor="mm")
+    b = io.BytesIO()
+    im.save(b, "PNG")
+    return b.getvalue(), {"vals": vals, "bars": bars, "colors": ["#fb1da7", "#fcd318", "#6b1dac"], "names": ["팝", "재즈", "록"]}

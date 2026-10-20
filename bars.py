@@ -100,6 +100,25 @@ def _find_panels(a, min_frac=0.06, tilt=False):
         return [l for l in ls if not any(o is not l and abs(o[0] - l[0]) <= 2.5 and abs(o[2] - l[2]) <= 3 and o[3] - o[2] > l[3] - l[2] + 3 for o in ls)]
     hs, vs = unshadow(hs), unshadow(vs)
 
+    satb = (a.max(axis=2).astype(np.int16) - a.min(axis=2)) >= 40
+
+    def bridge(ls, lim, sm):  # 축선 위에 겹친 색 표식(밝은 초록 세모 등)에 몇 px 끊긴 같은 줄은 잇는다 — 틈이 색 픽셀일 때만 (빈 틈은 다른 칸)
+        ls = sorted(ls, key=lambda l: (round(l[0]), l[2]))
+        out_ = []
+
+        def colored_gap(o, l):
+            c_ = int(round((o[0] + l[0]) / 2 - 0.5))
+            g_ = sm[c_, o[3] + 1:l[2]] if 0 <= c_ < sm.shape[0] else sm[0, 0:0]
+            return g_.size == 0 or g_.mean() >= 0.5
+        for l in ls:
+            o = next((o for o in out_ if abs(o[0] - l[0]) <= 2 and 0 <= l[2] - o[3] - 1 <= lim and colored_gap(o, l)), None)
+            if o is not None:
+                out_[out_.index(o)] = ((o[0] + l[0]) / 2, max(o[1], l[1]), o[2], l[3])
+            else:
+                out_.append(l)
+        return out_
+    hs, vs = bridge(hs, max(6, int(0.006 * W)), satb), bridge(vs, max(6, int(0.006 * H)), satb.T)
+
     def inside_fill(ls, m):  # 칠한 막대 안의 가는 줄(맞닿은 두 색 막대의 경계 행, 막대를 지나는 오차 막대) — 위·아래가 다 칠해져 있으면 축이 아님
         out = []
         for l in ls:
@@ -112,6 +131,21 @@ def _find_panels(a, min_frac=0.06, tilt=False):
             out.append(l)
         return out
     hs, vs = inside_fill(hs, dark), inside_fill(vs, dark.T)
+    # 색 있는 가로줄(세로축에서 출발하는 평평한 데이터 곡선·색 화살표)은 축 상자의 아래 축이 아님 — 그래프를 위아래로 쪼개지 않게
+    sat_ = a.max(axis=2).astype(np.int16) - a.min(axis=2)
+
+    def achro(l):  # 무채색 줄이거나, 색 픽셀이 칠한 면(막대 채움)의 가장자리면 축으로 둠 — 위아래가 비고 색만 가는 줄(데이터 곡선)은 뺌
+        c, t, s0, e0 = l
+        r = int(round(c - 0.5))
+        seg = dark[r, s0:e0 + 1]
+        if not seg.any() or float(np.median(sat_[r, s0:e0 + 1][seg])) < 80:
+            return True
+        col = seg & (sat_[r, s0:e0 + 1] >= 80)
+        k = int(t) + 3
+        up = sat_[max(0, r - k), s0:e0 + 1] >= 80
+        dn = sat_[min(H - 1, r + k), s0:e0 + 1] >= 80
+        return float((col & (up | dn)).sum()) >= 0.5 * col.sum()
+    hs = [l for l in hs if achro(l)]
     cands = []
     for vx, vt, vs0, ve in vs:
         # 왼쪽 끝이 이 세로축에 닿는 가로선들 (아래 축, 위 테두리, 위아래로 붙은 그래프의 공유 축)
@@ -145,11 +179,18 @@ def _find_panels(a, min_frac=0.06, tilt=False):
             b[3] = (min(sel) + max(sel)) / 2 + 0.5
     # 같은 모서리를 가진 후보(격자선 등)는 가장 큰 것만, 다른 축 상자 안에 든 상자(범례 틀·삽입 그림)는 뺌
     cands.sort(key=lambda b: -(b[2] - b[0]) * (b[3] - b[1]))
-    boxes = []
+    boxes, insets = [], []
     for b in cands:
         if any(abs(b[0] - o[0]) <= 6 and abs(b[3] - o[3]) <= 6 for o in boxes):
             continue
-        if any(o[0] - 3 <= b[0] and o[1] - 3 <= b[1] and b[2] <= o[2] + 3 and b[3] <= o[3] + 3 for o in boxes):
+        host = next((o for o in boxes if o[0] - 3 <= b[0] and o[1] - 3 <= b[1] and b[2] <= o[2] + 3 and b[3] <= o[3] + 3), None)
+        if host is not None:
+            # 큰 그래프 안의 작은 축 상자: 눈금 글자가 왼쪽에 있고 충분히 크면 삽입 그래프 — 큰 그래프 추출에서 그 영역을 뺀다
+            bw_, bh_ = b[2] - b[0], b[3] - b[1]
+            if bw_ * bh_ >= 0.04 * (host[2] - host[0]) * (host[3] - host[1]) and bw_ < 0.8 * (host[2] - host[0]):
+                lb_ = dark[int(b[1]):int(b[3]), max(0, int(b[0]) - int(0.2 * bw_) - 10):max(0, int(b[0]) - 3)]
+                if lb_.size and lb_.any(axis=0).sum() >= 4 and not any(abs(b[0] - q[0]) <= 6 and abs(b[3] - q[3]) <= 6 for q in insets):
+                    insets.append(b)
             continue
         boxes.append(b)
     out = []
@@ -179,6 +220,7 @@ def _find_panels(a, min_frac=0.06, tilt=False):
         q = next((q for q in merged if q["kind"] == "plot" and p["inner"] <= 0.55 and abs(q["box"][1] - p["box"][1]) <= 4
                   and abs(q["box"][3] - p["box"][3]) <= 4 and -2 <= p["box"][0] - q["box"][2] <= max(12, 0.02 * W)), None)
         if q:
+            q.setdefault("part_boxes", [[float(v) for v in q["box"]]]).append([float(v) for v in p["box"]])
             q["box"] = [q["box"][0], min(q["box"][1], p["box"][1]), p["box"][2], max(q["box"][3], p["box"][3])]
             q["parts"] = q.get("parts", 1) + 1
             q["why"] = f"칸 {q['parts']}개가 값축을 같이 쓰는 그래프"
@@ -188,6 +230,10 @@ def _find_panels(a, min_frac=0.06, tilt=False):
     out = merged
     for p in out:
         p["crop"] = _crop_for(a, p["box"], [o["box"] for o in out if o is not p])
+        ins = [b for b in insets if p["box"][0] - 3 <= b[0] and p["box"][1] - 3 <= b[1] and b[2] <= p["box"][2] + 3 and b[3] <= p["box"][3] + 3]
+        if ins and p["kind"] == "plot":  # 삽입 그래프: 눈금 글자·축 이름까지 넓힌 영역 (추출에서 뺄 곳)
+            p["insets"] = [[float(v) for v in _crop_for(a, b, [])] for b in ins]
+            p["insets"] = [[max(q[0], p["box"][0]), max(q[1], p["box"][1]), min(q[2], p["box"][2]), min(q[3], p["box"][3])] for q in p["insets"]]
     out.sort(key=lambda p: (round(p["box"][1] / max(1, 0.25 * H)), p["box"][0]))
     return out
 
@@ -1203,3 +1249,30 @@ def fit_labels(pairs, base_px):
     if v2 == 0:
         return None
     return k * v1 + c, v1, k * v2 + c, v2, res, dropped
+
+
+def grid_rows(a, box, base):
+    """값축 숫자가 없는 세로 막대그래프의 연한 가로 격자선 행 (아래 기준선 제외, 위→아래). 기준선에서 고른 간격일 때만 → [행] 또는 []"""
+    x0, x1 = int(box["x0"]) + 1, int(box["x1"])
+    if x1 - x0 < 40:
+        return []
+    g = D.gray(a).astype(float)
+    s = a.max(axis=2).astype(int) - a.min(axis=2)
+    top = max(0, int(box["y0"] - 0.35 * (base - box["y0"])))
+    bg = float(np.median(g[top:int(base), x0:x1]))
+    rows = []
+    for y in range(top, int(base) - 3):
+        ok = s[y, x0:x1] < 30
+        if ok.sum() < 0.1 * (x1 - x0):
+            continue
+        f = ((g[y, x0:x1] < bg - 6) & ok).sum() / ok.sum()
+        if f > 0.6:
+            rows.append(y)
+    lines = [(s_ + e) / 2 for s_, e in D.merge(D.runs(np.isin(np.arange(int(base) + 1), rows)), 1)] if rows else []
+    lines = [y for y in lines if base - y > 5]
+    if len(lines) < 2:
+        return []
+    d = np.diff(sorted(lines + [float(base)]))
+    if np.std(d) > 0.08 * np.mean(d) + 1:
+        return []
+    return sorted(lines)

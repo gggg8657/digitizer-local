@@ -300,9 +300,20 @@ def label_blobs(a, ax, ticks):
     if rr and ax.get("axisless"):  # 축선 없는 그래프: 옆 y 글자 꼬리·눈금 표시 줄은 건너뛰고 가로로 늘어선 글줄
         for s_, e_ in rr[:4]:
             bl_ = merge(runs(band[s_:e_ + 1].any(axis=0)), max(3, int(0.45 * (e_ - s_ + 1))))
+            ends = all(c0 + be < box["x0"] + 0.05 * (box["x1"] - box["x0"]) or c0 + bs > box["x1"] - 0.05 * (box["x1"] - box["x0"]) for bs, be in bl_)
+            if s_ == 0 and ends and len(rr) >= 2:  # 양쪽 y 글자('0'·'3.4')의 꼬리뿐인 줄
+                continue
             if len(bl_) >= 2 and bl_[-1][1] - bl_[0][0] >= 0.3 * (box["x1"] - box["x0"]) and e_ - s_ >= 3:
                 rr = [(s_, e_)]
                 break
+    if rr and not ax.get("axisless") and len(rr) >= 2:  # 첫 글줄이 y축 글자('0')의 꼬리뿐이면 건너뜀 — 그림 영역 아래로 가로로 늘어선 글줄
+        s_, e_ = rr[0]
+        bl_ = merge(runs(band[s_:e_ + 1].any(axis=0)), max(3, int(0.45 * (e_ - s_ + 1))))
+        # 덩어리마다 띠 맨 위에서 시작해 띠 바로 위(축선 옆 y 글자)로 이어지면 꼬리 — 왼쪽 y 글자 '0'·오른쪽 y2 글자 '3.4'
+        tails = s_ == 0 and top >= 1 and all(dark[max(0, top - 8):top - 1, max(0, c0 + bs - 4):c0 + be + 5].any() for bs, be in bl_)
+        if c0 + bl_[-1][1] < box["x0"] + 0.05 * (box["x1"] - box["x0"]) or (tails and all(
+                c0 + be < box["x0"] + 0.05 * (box["x1"] - box["x0"]) or c0 + bs > box["x1"] - 0.05 * (box["x1"] - box["x0"]) for bs, be in bl_)):
+            rr = rr[1:]
     if rr:
         s, e = rr[0]
         h = e - s + 1
@@ -322,11 +333,14 @@ def label_blobs(a, ax, ticks):
         # 글기둥은 그림 영역 높이 안에서만, 가로로 길게 이어진 줄(범례 틀 등)은 빼고 (위·아래 글자·선이 기둥을 잇지 않게)
         inb = band[max(0, int(box["y0"]) + 3 - r0):max(1, int(box["y1"]) - 2 - r0)]
         inb = inb[inb.mean(axis=1) < 0.6] if inb.size else inb
-        cr = merge(runs((inb if inb.size else band).any(axis=0)), 3)
+        cr = merge(runs((inb if inb.size else band).any(axis=0)), max(3, int(0.006 * max(H, W))))  # 큰 글씨의 소수점 틈('1 . 5')은 한 기둥
         if cr:
             s, e = cr[-1]  # 축에 가장 가까운 글기둥
             rows = band[:, s:e + 1].any(axis=1)
             bl = merge(runs(rows), 1)
+            if len(bl) >= 3:  # 그림 영역 위·아래 끝에서 글자 높이 넘게 벗어난 덩어리(x축 '0' 글자 등)는 y 눈금 글자가 아님
+                th_ = float(np.median([be - bs + 1 for bs, be in bl]))
+                bl = [(bs, be) for bs, be in bl if box["y0"] - 0.6 * th_ <= r0 + (bs + be) / 2 + 0.5 <= box["y1"] + 0.6 * th_] or bl
             out["y"] = [(r0 + (bs + be) / 2 + 0.5) for bs, be in bl]
             out["y_boxes"] = [[lo + s, r0 + bs, lo + e + 1, r0 + be + 1] for bs, be in bl]
             out["y_band"] = [lo + s, r0, lo + e, r1]
@@ -443,7 +457,57 @@ def pair_axis(values, positions, ticks, majors=None, edges=(), log=None, reverse
             "pairs": [[un(v), p] for v, p in pairs], "dropped": [[un(v), p] for v, p in dropped]}
 
 
-def auto_calibrate(a, xvals, yvals, xlog=None, ylog=None, each=None, hints=None, box_hint=None):
+def log_one(value, pos, ticks, majors, reverse=False):
+    """로그축 눈금 글자 하나(value, 글자 위치 pos) + 눈금 위치들 → 보정. 큰 눈금(글자 옆)을 기준으로 작은 눈금이
+    log10(2…9) 자리에 오도록 한 자릿수(decade) 픽셀 길이 s 를 찾는다: 후보 s 마다 맞는 눈금 수를 세어 가장 많이 맞는 것 (≥4개)."""
+    t = np.asarray(sorted(ticks), float)
+    if len(t) < 5:
+        return None
+    mj = np.asarray(sorted(majors or ticks), float)
+    if pos is None:
+        return None
+    j = int(np.argmin(np.abs(mj - pos))) if len(mj) else -1
+    p0 = float(mj[j]) if j >= 0 and abs(mj[j] - pos) <= 12 else float(t[np.argmin(np.abs(t - pos))])
+    if abs(p0 - pos) > 12:
+        return None
+    sgn = -1.0 if reverse else 1.0  # y 는 위로 갈수록 값이 큼 (픽셀은 작아짐)
+    fr = np.log10(np.arange(1, 10))  # 0, .301, .477, …, .954
+    offs = np.concatenate([fr + d for d in range(-4, 4)])
+    offs = offs[offs != 0]
+    d = (t - p0) * sgn
+    cands = []
+    for di in d:
+        if abs(di) < 3:
+            continue
+        for o in offs:
+            if o * di > 0:
+                cands.append(di / o)
+    best = None
+    for s in cands:
+        if s < 20:
+            continue
+        pred = p0 + sgn * s * offs
+        hit = [x for x in t if abs(x - p0) >= 3 and np.min(np.abs(pred - x)) <= 1.5]
+        # 맞은 눈금이 decade 안의 여러 자리(2·3·5 …)를 고르게 덮어야 함 — 아무 간격으로나 몇 개 맞는 것 방지
+        if len(hit) >= 4 and (best is None or len(hit) > best[0] or (len(hit) == best[0] and s > best[1])):
+            best = (len(hit), s, hit)
+    if not best or best[0] < 0.6 * (len(t) - 1):
+        return None
+    n, s, hit = best
+    # 맞은 눈금으로 다시 최소제곱 (값 = log10)
+    pairs = [(math.log10(value), p0)]
+    for x in hit:
+        o = (x - p0) * sgn / s
+        k = int(np.argmin(np.abs(offs - o)))
+        pairs.append((math.log10(value) + offs[k], float(x)))
+    k_, b_, r = _fit(pairs)
+    pairs.sort(key=lambda q: q[1] * (-1 if reverse else 1))
+    f1, f2 = pairs[0][0], pairs[-1][0]
+    return {"p1": (f1 - b_) / k_, "p2": (f2 - b_) / k_, "v1": 10 ** f1, "v2": 10 ** f2, "log": True, "resid_px": r, "n": len(pairs),
+            "ambiguous": False, "pairs": [[10 ** v, p] for v, p in pairs], "dropped": []}
+
+
+def auto_calibrate(a, xvals, yvals, xlog=None, ylog=None, each=None, hints=None, box_hint=None, partial=False):
     """축·눈금 검출 + (VLM 이 읽은) 눈금 값 → 보정 제안. 값이 없으면 검출 결과만.
     each={"x": [...], "y": [...]} 는 글자 덩어리 하나하나를 따로 읽은 값(1:1, y 는 아래→위). 둘 다 있으면 더 잘 맞는 쪽.
     hints={"x": bool} 는 VLM 의 로그축 판단 — 눈금 모양(작은 눈금 간격)으로 판단되면 그쪽이 우선."""
@@ -482,9 +546,22 @@ def auto_calibrate(a, xvals, yvals, xlog=None, ylog=None, each=None, hints=None,
             if c:
                 c["source"] = "ticks"
                 opts.append(c)
+        if not opts and hint is not False:  # 로그축에 숫자 글자가 하나뿐(10¹)이고 작은 눈금(2…9)만 있음 → 작은 눈금 간격으로 한 자릿수 길이를 잰다
+            one = [x for x in (each.get(k) or []) if x is not None] if each.get(k) else []
+            vv = [x for x in (vals or []) if x is not None]
+            v1 = vv[0] if len(vv) == 1 else one[0] if len(one) == 1 else None
+            if v1 and v1 > 0 and len(tk[k]) >= 5:
+                pp = pos if len(pos) == 1 else [p for p, x in zip(lb[k], each.get(k) or []) if x is not None] if one else []
+                c = log_one(v1, pp[0] if len(pp) == 1 else None, tk[k], tk[k + "_major"], reverse=(k == "y"))
+                if c:
+                    c["source"] = "log_one"
+                    opts.append(c)
+                    res["warn"].append(f"{k}축: 숫자 글자가 {v1:g} 하나뿐이라 작은 눈금(2…9) 간격으로 로그 자릿수 길이를 정했습니다 — 확인하세요")
         if opts:
             fits[k] = min(opts, key=lambda c: (c["resid_px"] >= 1.5, c["ambiguous"], -c["n"], c["resid_px"]))
     cx, cy = fits.get("x"), fits.get("y")
+    if partial:  # 한 축만 맞춘 경우(칸막이 그래프의 안쪽 칸: y 글자 없음)에 app 이 씀
+        res["_fits"] = fits
     if cx and cy:
         res["calib"] = {"x": {"p1": [cx["p1"], xa["y"]], "p2": [cx["p2"], xa["y"]], "v1": cx["v1"], "v2": cx["v2"], "log": cx["log"]},
                         "y": {"p1": [ya["x"], cy["p1"]], "p2": [ya["x"], cy["p2"]], "v1": cy["v1"], "v2": cy["v2"], "log": cy["log"]}}
@@ -639,9 +716,33 @@ def color_word(s):
 def match_legend(legend, suggestions):
     """범례(이름·색 단어) ↔ 검출한 색 후보 짝짓기 (가까운 색 순, 중복 없이)"""
     out, used = [], set()
-    for it in legend:
+    # 범례 색 ↔ 후보 색: 차례로 가장 가까운 것을 집으면(탐욕) 비슷한 두 색(갈색·적갈색)이 엇갈릴 수 있어, 전체 거리 합이 가장 작은 짝을 먼저 찾는다
+    wants = [color_word(it.get("color")) for it in legend]
+    pre = {}
+    idx = [i for i, w in enumerate(wants) if w]
+    if 2 <= len(idx) <= 7 and len(suggestions) >= 2:
+        import itertools
+        Wc = np.array([hex2rgb(wants[i]) for i in idx], float)
+        Sc = np.array([hex2rgb(s_["color"]) for s_ in suggestions], float)
+        Dm = np.sqrt(((Wc[:, None] - Sc[None]) ** 2).sum(-1))
+        best_ = None
+        k_ = min(len(idx), len(suggestions))
+        for rows in itertools.combinations(range(len(idx)), k_):
+            for perm in itertools.permutations(range(len(suggestions)), k_):
+                pairs_ = [(r, c) for r, c in zip(rows, perm) if Dm[r, c] < 160]
+                cost = sum(Dm[r, c] for r, c in pairs_) + 160 * (len(idx) - len(pairs_))
+                if best_ is None or cost < best_[0] - 1e-9:
+                    best_ = (cost, pairs_)
+            if len(suggestions) > 8:
+                break
+        if best_:
+            pre = {idx[r]: c for r, c in best_[1]}
+    for li, it in enumerate(legend):
         want = color_word(it.get("color"))
         best = None
+        if li in pre and pre[li] not in used:
+            best = (0.0, pre[li])
+            want = None
         if want:
             w = np.array(hex2rgb(want), float)
             for i, s in enumerate(suggestions):
