@@ -138,12 +138,15 @@ def _find_panels(a, min_frac=0.06, tilt=False):
         c, t, s0, e0 = l
         r = int(round(c - 0.5))
         seg = dark[r, s0:e0 + 1]
-        if not seg.any() or float(np.median(sat_[r, s0:e0 + 1][seg])) < 80:
+        md = float(np.median(sat_[r, s0:e0 + 1][seg])) if seg.any() else 0.0
+        # 채도 낮은 색 곡선(보라 #8c6bb1 처럼 채도 50~80)도 데이터 곡선 — 평평한 구간이 아래 축처럼 보여 그래프를 위아래로 쪼개지 않게
+        st = 80 if md >= 80 else 50
+        if md < st:
             return True
-        col = seg & (sat_[r, s0:e0 + 1] >= 80)
+        col = seg & (sat_[r, s0:e0 + 1] >= st)
         k = int(t) + max(6, int(0.01 * H))  # 굵은 색 곡선(4~6px)은 이만큼 떨어지면 색이 없음 — 막대 채움은 이어짐
-        up = (sat_[max(0, r - k):r, s0:e0 + 1] >= 80).all(axis=0)  # 위(또는 아래)로 k 행 내내 색 = 칠한 면
-        dn = (sat_[r + 1:min(H, r + k + 1), s0:e0 + 1] >= 80).all(axis=0)
+        up = (sat_[max(0, r - k):r, s0:e0 + 1] >= st).all(axis=0)  # 위(또는 아래)로 k 행 내내 색 = 칠한 면
+        dn = (sat_[r + 1:min(H, r + k + 1), s0:e0 + 1] >= st).all(axis=0)
         return float((col & (up | dn)).sum()) >= 0.5 * col.sum()
     hs = [l for l in hs if achro(l)]
     cands = []

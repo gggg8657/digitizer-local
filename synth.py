@@ -875,3 +875,94 @@ def combo_case(kind, dpi=100):
     plt.close(fig)
     return b_.getvalue(), {"ticks": tk, "ticks2": tk2, "lim": lim, "lim2": lim2, "log2": bool(ax2 and ax2.get_yscale() == "log"),
                            "bars": bars, "names": names, "colors": colors, "axes": axes, "lines": lt}
+
+
+# ── 2026-10-20 겹친 선·점선 시험용 ─────────────
+def overlap_case(kind, dpi=100):
+    """참값을 아는 겹친 선·점선 그림 (matplotlib) → (PNG, truth). truth['legend'] = 가짜 VLM 범례, series[i]['style'] = 선 모양.
+    style_markers — 두 색 × (실선+속 찬 점 / 파선+빈 원), 범례는 색마다 한 줄 + 검은 모양 견본 두 줄(3 boxes / 4 boxes)
+    bw_styles     — 검정 실선·파선·점선 세 계열이 서로 가로지름 (범례 세 줄, 색 같음)
+    trend_same    — 실측 실선 + 같은 색 추세 파선, 범례는 실측 한 줄
+    coincide      — 파랑이 주황 밑을 같은 값으로 x 3…6.8 동안 지나감(그 구간에서 꺾임)
+    tail          — 파랑이 수직에 가깝게 꺾여 0 선(주황) 위로 내려앉고 그 밑에 숨음
+    similar       — 비슷한 두 파랑이 교차
+    nolegend      — 범례 없는 같은 색(검정) 두 선 교차
+    dotted_grid   — 검은 점선 격자 + 회색 파선 기준선 + 검은 실선 하나"""
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(6.4, 4.4), dpi=dpi)
+    x = np.linspace(0, 10, 201)
+    legend = []
+    if kind == "style_markers":
+        xm = np.array([0, 50, 100, 150, 200])
+        data = [("orange", "#ff7f0e", [30, 34, 41, 47, 45], [22, 26, 33, 34, 40]), ("green", "#2ca02c", [12, 15, 14, 19, 23], [8, 9, 12, 12, 17])]
+        series = []
+        for nm, c, a_, b_ in data:
+            ax.plot(xm, a_, "-o", color=c, lw=1.8, ms=5)
+            ax.plot(xm, b_, "--o", color=c, lw=1.8, ms=5, mfc="white")
+            series += [dict(name=f"{nm} · 3 boxes", color=c, kind="points", style="solid", x=xm, y=np.array(a_, float)),
+                       dict(name=f"{nm} · 4 boxes", color=c, kind="points", style="dashed", x=xm, y=np.array(b_, float))]
+            legend.append({"name": nm, "color": c, "style": "line", "marker": "none"})
+        legend += [{"name": "3 boxes", "color": "#000000", "style": "line", "marker": "circle"},
+                   {"name": "4 boxes", "color": "#000000", "style": "dashed", "marker": "circle"}]
+        ax.set_ylim(0, 55)
+    elif kind == "bw_styles":
+        ys = [(1 + 0.7 * x, "-", "solid", "solid run"), (8 - 0.5 * x, "--", "dashed", "dashed run"), (4 + 1.2 * np.sin(0.8 * x), ":", "dotted", "dotted run")]
+        series = []
+        for y, ls, st, nm in ys:
+            ax.plot(x, y, ls=ls, color="k", lw=1.4)
+            series.append(dict(name=nm, color="#000000", kind="line", style=st, x=x, y=y))
+            legend.append({"name": nm, "color": "#000000", "style": {"solid": "line"}.get(st, st), "marker": "none"})
+    elif kind == "trend_same":
+        xs = np.linspace(0, 10, 41)
+        y = 2 + 0.6 * xs + 0.8 * np.sin(1.7 * xs)
+        k, b = np.polyfit(xs, y, 1)
+        ax.plot(xs, y, color="#2ca02c", lw=1.6)
+        ax.plot(xs, k * xs + b, color="#2ca02c", ls="--", lw=1.2)
+        series = [dict(name="sales · 실선", color="#2ca02c", kind="line", style="solid", x=xs, y=y),
+                  dict(name="sales · 파선", color="#2ca02c", kind="line", style="dashed", x=xs, y=k * xs + b)]
+        legend = [{"name": "sales", "color": "#2ca02c", "style": "line", "marker": "none"}]
+    elif kind == "coincide":
+        top = 3 + 1.5 * np.sin(0.7 * x)
+        a0, a1 = 3.0, 6.8
+        m = (x >= a0) & (x <= a1)
+        under = np.where(m, top, np.where(x < a0, top[x >= a0][0] + 0.45 * (x - a0), top[x <= a1][-1] - 0.5 * (x - a1)))
+        ax.plot(x, under, color="#1f77b4", lw=2)
+        ax.plot(x, top, color="#ff7f0e", lw=2)
+        series = [dict(name="A", color="#1f77b4", kind="line", x=x, y=under), dict(name="B", color="#ff7f0e", kind="line", x=x, y=top)]
+        legend = [{"name": "A", "color": "#1f77b4", "style": "line"}, {"name": "B", "color": "#ff7f0e", "style": "line"}]
+    elif kind == "tail":
+        xx = np.linspace(0, 10, 401)
+        y1 = np.where(xx < 7, 2 + np.sin(xx), np.maximum(0, (2 + np.sin(7)) * (1 - (xx - 7) / 0.8)))
+        base = np.zeros_like(xx)
+        ax.plot(xx, y1, color="#1f77b4", lw=2)
+        ax.plot(xx, base, color="#ff7f0e", lw=2.5)
+        ax.set_ylim(-0.5, 3.5)
+        series = [dict(name="decay", color="#1f77b4", kind="line", x=xx, y=y1), dict(name="floor", color="#ff7f0e", kind="line", x=xx, y=base)]
+        legend = [{"name": "decay", "color": "#1f77b4", "style": "line"}, {"name": "floor", "color": "#ff7f0e", "style": "line"}]
+    elif kind == "similar":
+        y1 = 5 + 1.6 * (x - 5)
+        y2 = 5 - 1.6 * (x - 5) + 0.6 * np.sin(x)
+        ax.plot(x, y1, color="#1f77b4", lw=1.8)
+        ax.plot(x, y2, color="#2f8fd8", lw=1.8)
+        series = [dict(name="P", color="#1f77b4", kind="line", x=x, y=y1), dict(name="Q", color="#2f8fd8", kind="line", x=x, y=y2)]
+        legend = [{"name": "P", "color": "#1f77b4", "style": "line"}, {"name": "Q", "color": "#4a90e2", "style": "line"}]
+    elif kind == "nolegend":
+        y1, y2 = 1 + 0.8 * x, 9 - 0.7 * x
+        ax.plot(x, y1, color="k", lw=1.4)
+        ax.plot(x, y2, color="k", lw=1.4)
+        series = [dict(name="", color="#000000", kind="line", x=x, y=y1), dict(name="", color="#000000", kind="line", x=x, y=y2)]
+    elif kind == "dotted_grid":
+        y1 = 2 + 0.5 * x + 0.3 * np.sin(2 * x)
+        ax.plot(x, y1, color="k", lw=1.6)
+        ax.grid(True, ls=":", color="k", lw=0.7)
+        ax.axhline(4.0, ls="--", color="0.4", lw=1)
+        series = [dict(name="signal", color="#000000", kind="line", x=x, y=y1)]
+        legend = [{"name": "signal", "color": "#000000", "style": "line"}]
+    else:
+        raise ValueError(kind)
+    png, tr = _mpl_truth(fig, ax, series, dpi=dpi)
+    tr["legend"] = legend
+    return png, tr

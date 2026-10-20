@@ -857,6 +857,59 @@ try:
     r2 = app.auto(r["deskew"]["image"]["id"])  # 바로 세운 그림을 다시 넣으면 또 돌리지 않음
     assert r2["deskew"] is None
 
+    # 14) 2026-10-20 겹친 선·점선: 같은 색 실선/파선 + 모양 범례, 흑백 세 모양 교차, 같은 색 추세 파선, 긴 겹침(겹침 표시),
+    #     꺾여 숨은 꼬리, 비슷한 두 색 교차, 범례 없는 같은 색 교차, 검은 점선 격자
+    if app._has("matplotlib") and app._has("scipy"):
+        def best_err(r, s_true, used):
+            """참 계열 ↔ 뽑은 계열(아직 안 쓴 것 중 오차 가장 작은 것): (최대 오차 %, 덮은 비율, 계열)"""
+            cal = r["detect"]["calib"]
+            yr = abs(cal["y"]["v2"] - cal["y"]["v1"])
+            tx, ty = np.asarray(s_true["x"], float), np.asarray(s_true["y"], float)
+            best = None
+            for i, g in enumerate(r["detect"]["series"]):
+                if i in used or not g.get("px"):
+                    continue
+                d = np.asarray(app.series_data(cal, g), float)
+                if s_true["kind"] == "line":
+                    k = (d[:, 0] >= tx.min()) & (d[:, 0] <= tx.max())
+                    if not k.any():
+                        continue
+                    e = float((np.abs(d[k, 1] - np.interp(d[k, 0], tx, ty)) / yr * 100).max())
+                    cov = (d[:, 0].max() - d[:, 0].min()) / (tx.max() - tx.min())
+                else:
+                    e = float(max(np.min(np.hypot((tx - x) / (tx.max() - tx.min()), (ty - y) / yr)) for x, y in d) * 100)
+                    cov = len(d) / len(tx)
+                if best is None or e < best[0]:
+                    best = (e, cov, g, i)
+            if best:
+                used.add(best[3])
+            return best
+        for kind, lim in (("style_markers", 1.0), ("bw_styles", 1.0), ("trend_same", 3.0), ("coincide", 1.2), ("tail", 1.5),
+                          ("similar", 1.0), ("nolegend", 1.0), ("dotted_grid", 1.2)):
+            png, tr = S.overlap_case(kind)
+            info = app.save_image(png)
+            app.chat_vision = vlm_with({"x_ticks": tr["xticks"], "y_ticks": tr["yticks"], "chart_type": "line", "legend": tr["legend"]})
+            r = app.auto(info["id"])
+            assert r["detect"].get("calib"), (kind, r["message"])
+            got = [g for g in r["detect"]["series"] if g.get("px")]
+            assert len(got) == len(tr["series"]), (kind, [(g["name"], len(g["px"])) for g in r["detect"]["series"]])
+            used, worst = set(), 0.0
+            for s_ in tr["series"]:
+                b = best_err(r, s_, used)
+                assert b and b[0] < lim and b[1] > 0.9, (kind, s_["name"], b and b[:2])
+                if s_.get("style"):
+                    assert b[2].get("line_style") == s_["style"], (kind, s_["name"], b[2].get("line_style"))
+                if s_["name"] and kind in ("style_markers", "trend_same", "bw_styles", "similar"):
+                    assert b[2]["name"] == s_["name"], (kind, b[2]["name"], s_["name"])
+                worst = max(worst, b[0])
+            if kind == "style_markers":  # 표식 = 데이터 점 5개, 모양 범례(3 boxes/4 boxes)는 계열이 아님
+                assert all(g["kind"] == "line+markers" and len(g["px"]) == 5 for g in got), [(g["name"], g["kind"], len(g["px"])) for g in got]
+                assert r["detect"].get("style_legend") == {"solid": "3 boxes", "dashed": "4 boxes"}, r["detect"].get("style_legend")
+            if kind in ("coincide", "tail"):  # 다른 선 밑에 같은 값으로 숨은 구간 = 겹침(shared)
+                g = next(g for g in got if g["name"] in ("A", "decay"))
+                assert g.get("shared") and g.get("interp"), (kind, g.get("shared"), g.get("interp"))
+            ROWS.append((f"겹친선-{kind}", f"{len(got)}계열", len(got), 0.0, float("nan"), worst, None))
+
     # 8) 폐쇄망: 외부 CDN 없음, 저작권 표기
     ui = app.read(os.path.join(app.ROOT, "ui.html"))
     assert not re.search(r'<(script|link|img)[^>]+(src|href)="https?://', ui), "외부 CDN 참조 있음"

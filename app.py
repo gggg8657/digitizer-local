@@ -31,6 +31,7 @@ from PIL import Image
 
 import bars as B
 import digitize as D
+import linestyle as LS
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WS = os.environ.get("WORKSPACE") or os.path.join(ROOT, "_workspace")  # 포털이 AGENT_DATA/<도구> 로 모아 줌
@@ -1137,9 +1138,21 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
                                          "끊김 위쪽 값은 ✂ 자르기로 그 구간만 골라 따로 보정하세요.")
         res["message"] += " ⚠ y축이 끊긴 그래프입니다 — 경고를 확인하세요."
         res["axis_break"] = brk
-    det["colors"] = D.suggest_colors(a, det["box"])
+    det["colors"] = D.suggest_colors(a, det["box"], k=max(6, len(legend) + 1))  # 범례가 긴 촘촘한 선 묶음(7~10개)도 색을 다 찾게
+    det["colors"] = D.wanted_neutral(a, det["box"], legend, det["colors"], D.find_legend_boxes(a, det["box"]))
+    legend, sty = LS.style_legend(legend, det["colors"])  # '실선 = 3 boxes, 파선 = 4 boxes' 같은 모양 범례는 계열이 아니라 모양 이름
+    if sty:
+        det["style_legend"] = sty
+        det.setdefault("warn", []).append("범례의 검은 견본(" + ", ".join(f"{LS.label(k)} = {v}" for k, v in sty.items())
+                                          + ")은 계열이 아니라 선 모양 이름으로 봤습니다 — 같은 색의 실선·파선 계열 이름에 붙였습니다")
     det["legend_boxes"] = D.find_legend_boxes(a, det["box"])
     det["series"] = D.match_legend(legend, det["colors"])
+    try:
+        det["series"] = D.refine_legend_colors(a, det["box"], det["series"], legend)
+        det["series"] = D.refine_free(det["series"], legend, det["colors"])
+        det["series"] = D.refine_similar(a, det["box"], det["series"], legend)
+    except Exception as e:
+        det.setdefault("warn", []).append(f"범례 색 다듬기 실패 ({e})")
     if res["mode"] == "bar" and (res.get("bar") or {}).get("lines"):  # 막대 콤보의 선 계열 (막대 모드에서도 점이 있는 계열)
         det["series"] = res["bar"]["lines"]
     if res["mode"] == "xy" and det.get("calib") and v and len(v.get("y2_ticks") or []) >= 2:
@@ -1332,13 +1345,42 @@ def extract_all(a, det, chart_type=""):
     # 같은 색 범례 계열이 여럿(흑백 그림): 표식 모양으로 가른다
     done = set()
     rgb = lambda c: np.array(D.hex2rgb(c), float)  # noqa: E731
+    style_lab = det.get("style_legend") or {}
     for i, s in enumerate(sers):
         if i in done or not s.get("color"):
             continue
-        grp = [j for j, t in enumerate(sers) if t.get("color") and j not in done and np.sqrt(((rgb(t["color"]) - rgb(s["color"])) ** 2).sum()) < 60]
+        grp = [j for j, t in enumerate(sers) if t.get("color") and j not in done and np.sqrt(((rgb(t["color"]) - rgb(s["color"])) ** 2).sum()) < 60
+               and (j == i or not (t.get("color_split") and s.get("color_split")))  # 비슷한 두 색으로 가른 계열은 따로
+               and (np.ptp(rgb(t["color"])) < 20) == (np.ptp(rgb(s["color"])) < 20)]  # 회색과 연보라처럼 무채색·유채색은 같은 색이 아님
         if len(grp) < 2:
             continue
         done.update(grp)
+        # 같은 색 범례 계열이 선 모양(실선·파선·점선)·표식 채움으로 갈림 → 모양별 경로로 나눔 (2026-10-20)
+        sp_ = None
+        if any(LS.norm_style(sers[j].get("style")) in ("dashed", "dotted", "dashdot") for j in grp):  # 범례가 선 모양이 다르다고 할 때만
+            try:
+                sp_ = LS.separate(a, box, s["color"], legends=legends, want=len(grp))
+            except Exception as e:
+                det.setdefault("warn", []).append(f"선 모양으로 가르기 실패 ({e})")
+        if sp_ and len(sp_["paths"]) >= len(grp):
+            got = LS.to_series(sp_, [sers[j] for j in grp], calib, style_lab)
+            if got:
+                for j, o in zip(grp, got):
+                    sers[j] = o
+                continue
+        if sp_ is None and any(LS.norm_style(sers[j].get("style")) in ("dashed", "dotted", "dashdot") for j in grp):
+            # 조각으로 못 가름(저해상도 — 대시·점이 뭉개짐): 같은 색 선 k 개를 방향으로 따로 추적한 뒤 각 경로의 틈 모양으로 이름 짝
+            try:
+                tr = LS.multi_track(a, box, s["color"], k=len(grp), legends=legends)
+                sp2 = LS.tracks_to_paths(a, box, s["color"], tr, legends, styles=[sers[j].get("style") for j in grp]) if tr else None
+            except Exception:
+                sp2 = None
+            if sp2:
+                got = LS.to_series(sp2, [sers[j] for j in grp], calib, style_lab)
+                if got:
+                    for j, o in zip(grp, got):
+                        sers[j] = o
+                    continue
         # 선만 있는 계열(표식 없음) + 표식 계열이 같은 색: 표식은 열림으로 떼어 내고 나머지 픽셀을 곡선으로
         plain = [j for j in grp if str(sers[j].get("style") or "").lower() in ("line", "dashed") and str(sers[j].get("marker") or "none").lower() in ("", "none")]
         mkd = [j for j in grp if j not in plain]
@@ -1350,6 +1392,19 @@ def extract_all(a, det, chart_type=""):
                                     warn=[f"같은 색의 선 계열과 표식 계열({', '.join(nm)})을 갈랐습니다 — 이 계열: 표식 {len(sp['markers'])}개"])
                 sers[plain[0]] = dict(sers[plain[0]], px=sp["line"], mode="line", how="n", kind="line", split=True,
                                       warn=[f"같은 색의 선 계열과 표식 계열({', '.join(nm)})을 갈랐습니다 — 이 계열: 표식을 지운 곡선"])
+                continue
+        if all(LS.norm_style(sers[j].get("style")) in (None, "solid") and str(sers[j].get("marker") or "none").lower() in ("", "none") for j in grp):
+            # 같은 색·같은 모양 선 여럿(표식 없음): 교차점에서 방향이 이어지게 따로 추적 (2026-10-20)
+            try:
+                tr = LS.multi_track(a, box, s["color"], k=len(grp), legends=legends)
+            except Exception:
+                tr = None
+            if tr:
+                for j, t in zip(grp, tr):
+                    d_ = D.resample(calib, t, "n", 50)
+                    X, Y = D.to_pixel(calib, [q[0] for q in d_], [q[1] for q in d_]) if d_ else ([], [])
+                    sers[j] = dict(sers[j], px=[[float(x), float(y)] for x, y in zip(X, Y)], mode="line", how="n", kind="line", split=True, line_style="solid",
+                                   warn=[f"같은 색·같은 모양 선 {len(grp)}개를 교차점에서 방향이 이어지게 따로 추적했습니다 — 어느 선이 어느 이름인지는 그림에서 확인하세요"])
                 continue
         mg = D.marker_groups(a, calib, box, s["color"], len(grp), legends=legends)
         names = [sers[j]["name"] for j in grp]
@@ -1391,23 +1446,76 @@ def extract_all(a, det, chart_type=""):
             out.append(s)
             continue
         hint = "markers" if chart_type == "scatter" else ("markers" if "marker" in (s.get("style") or "") and chart_type != "line" else None)
+        if hint and LS.norm_style(s.get("style")) in ("dashed", "dotted", "dashdot") and str(s.get("marker") or "none").lower() in ("", "none"):
+            hint = None  # 산점도에 겹친 점선·파선(맞춤선)은 범례가 선이라고 함 — 점이 아니라 선 (2026-10-20)
         # 색이 가까운 다른 계열이 있으면 허용오차를 줄여 두 선이 한 마스크에 섞이지 않게 (OWID 갈색·주황 등)
         others = [np.array(D.hex2rgb(t["color"]), float) for t in sers if t is not s and t.get("color") and not t.get("split")]
         dmin = min([float(np.sqrt(((rgb(s["color"]) - o) ** 2).sum())) for o in others] or [999.0])
         tol = float(min(60.0, max(25.0, 0.45 * dmin)))
-        r = D.auto_series(a, calib, box, s["color"], legends=legends, hint=hint, tol=tol)
+        if hint != "markers":  # 범례 한 줄인데 같은 색 선이 모양 둘(실선 + 파선 추세선 등) → 모양별 계열 (2026-10-20)
+            try:
+                sp_ = LS.separate(a, box, s["color"], tol=tol, legends=legends)
+            except Exception as e:
+                sp_ = None
+                det.setdefault("warn", []).append(f"선 모양으로 가르기 실패 ({e})")
+            if sp_:
+                got = LS.to_series(sp_, [s], calib, style_lab)
+                if got:
+                    out += got
+                    continue
+        bl = bool(named) and hint != "markers" and D.blend_helps(a, s["color"], tol, box, legends)  # 가는 선 안티앨리어싱
+        r = D.auto_series(a, calib, box, s["color"], legends=legends, hint=hint, tol=tol, blend=bl)
+        if not r["px"] and named and np.ptp(rgb(s["color"])) > 60 and not bl:
+            # 저해상도의 가는 선: 범례 색 그대로인 픽셀은 없고 흰 바탕과 섞인 옅은 색만 있음 → 섞인 픽셀로 다시 (2026-10-20)
+            r2 = D.auto_series(a, calib, box, s["color"], legends=legends, hint=hint, tol=tol, blend=True)
+            if r2["px"]:
+                r = r2
+                r["warn"] = list(r["warn"]) + ["범례 색 그대로인 픽셀이 없어(가는 선·저해상도) 흰 바탕과 섞인 옅은 색으로 뽑았습니다 — 겹쳐 보기로 확인하세요"]
+        if not r["px"] and named and np.ptp(rgb(s["color"])) > 60:
+            # 범례에 있는 색 선이 그림 폭을 가로지르는 곧은 선(0 선·기준선 계열)이면 격자선 지우기에 통째로 빠짐 → 지우지 않고 다시 (2026-10-20)
+            r2 = D.auto_series(a, calib, box, s["color"], legends=legends, hint=hint, tol=tol, remove_lines=False)
+            if r2["px"]:
+                r = r2
+                r["warn"] = list(r["warn"]) + ["그림을 가로지르는 곧은 선이라 격자선으로 지울 뻔했습니다 — 범례에 있는 계열로 뽑았습니다"]
         px = r["px"]
+        if not named and r["kind"] == "line":  # 범례 없음: 같은 색 선이 여럿 교차 → 따로 추적 (2026-10-20)
+            try:
+                tr = LS.multi_track(a, box, s["color"], k=0, tol=tol, legends=legends)
+            except Exception:
+                tr = None
+            if tr:
+                for t in tr:
+                    d_ = D.resample(calib, t, "n", 50)
+                    X, Y = D.to_pixel(calib, [q[0] for q in d_], [q[1] for q in d_]) if d_ else ([], [])
+                    out.append(dict(s, name="", px=[[float(x), float(y)] for x, y in zip(X, Y)], mode="line", how="n", kind="line", line_style="solid",
+                                    warn=[f"같은 색 선 {len(tr)}개가 교차해 방향이 이어지게 따로 추적했습니다"]))
+                continue
         if not named:  # 범례 없음: 선이 그림 폭의 30% 넘게 지나거나 표식이 3개 이상일 때만 계열로
             xs = [p[0] for p in px]
             if not px or ((max(xs) - min(xs) < 0.3 * W) and len(px) < 3):
                 continue
         o = dict(s, px=px, mode=r["mode"], how=r["how"], kind=r["kind"], warn=r["warn"])
+        if r.get("line_style"):
+            o["line_style"] = r["line_style"]
         if det.get("calib2") and str(s.get("axis") or "").lower().startswith("r"):
             o["calib"] = det["calib2"]  # 오른쪽 y축 계열 — 값은 오른쪽 눈금으로
         out.append(o)
     for i, s in enumerate(out):
         if not s.get("name"):
             s["name"] = f"계열 {i + 1}"
+    try:
+        out = LS.grid_pass(out, a, box)
+    except Exception as e:
+        det.setdefault("warn", []).append(f"표식 격자 읽기 실패 ({e})")
+    for s in out:
+        s.pop("_path", None)
+    for s in out:  # 선 계열의 선 모양(실선·파선·점선·일점쇄선) — 모양으로 가른 계열은 이미 있음
+        if s.get("line_style") or s.get("kind") != "line" or not s.get("px") or not s.get("color"):
+            continue
+        try:
+            s["line_style"] = LS.style_of(a, box, s["color"], legends)
+        except Exception:
+            pass
     import noise
     try:
         out = noise.clean(a, det, out, chart_type, det.get("colorbar"))
@@ -1449,6 +1557,23 @@ def interp_flags(s):
         return [False] * len(px)
     fl = [any(a_ - 0.5 <= p[0] <= b_ + 0.5 for a_, b_ in sp) for p in px]
     return fl
+
+
+def point_flags(s):
+    """계열 점마다 '겹침'(shared — 다른 선·표식 밑에 같은 값으로 숨어 그 경로·표식으로 채움) · '보간'(직선 보간) · '' (2026-10-20).
+    shared 구간이 interp 보다 먼저 — 겹침 구간은 interp 에도 들어 있다(예전 화면은 '보간됨'으로 봄)."""
+    px = s.get("px") or []
+    sh = s.get("shared") or []
+    it = interp_flags(s)
+    out = []
+    for p, f in zip(px, it):
+        if any(a_ - 0.5 <= p[0] <= b_ + 0.5 for a_, b_ in sh):
+            out.append("겹침")
+        elif f:
+            out.append("보간")
+        else:
+            out.append("")
+    return out
 
 
 def fmt_num(v):
@@ -1501,13 +1626,13 @@ def export(calib, series, fmt="csv", meta=None, bars=None, orient="v", calib2=No
             for ci, (name, d) in enumerate(cols):
                 sh = wb.create_sheet(re.sub(r"[\[\]:*?/\\]", "_", name)[:31] or "계열")
                 fl = None
-                if not bars and ci < len(series) and series[ci].get("interp"):  # 다른 선에 가려 보간한 점 표시
+                if not bars and ci < len(series) and (series[ci].get("interp") or series[ci].get("shared")):  # 다른 선에 가려 채운 점 표시 (겹침·보간)
                     s_ = series[ci]
                     xs_ = D.to_data(s_.get("calib") or calib, [p[0] for p in s_["px"]], [p[1] for p in s_["px"]])[0]
-                    fl = {round(float(x), 9): f for x, f in zip(xs_, interp_flags(s_))}
+                    fl = {round(float(x), 9): f for x, f in zip(xs_, point_flags(s_))}
                 sh.append((["범주", "계열", "아래 끝", "위 끝", "조각 값"] if ci == 0 else ["x(그림 픽셀)", "가까운 범주", "값"]) if bars else ["x", "y"] + (["보간됨"] if fl else []))
                 for r in d:
-                    sh.append(list(r) + ((["보간" if fl.get(round(float(r[0]), 9)) else ""]) if fl else []))
+                    sh.append(list(r) + ([fl.get(round(float(r[0]), 9)) or ""] if fl else []))
             info = wb.create_sheet("보정")
             for k, c in [("x", calib["x"]), ("y", calib["y"])] + ([("오른쪽 y", calib2["y"])] if bars and calib2 else []):
                 if c.get("cat"):
@@ -1524,6 +1649,10 @@ def export(calib, series, fmt="csv", meta=None, bars=None, orient="v", calib2=No
                 if re.fullmatch(r"#[0-9a-fA-F]{6}", c_) and nm_ not in seen_:
                     seen_.add(nm_)
                     info.append(["계열 색", nm_, c_.lower()])
+            for s_ in series:  # 선 모양(실선 아님) — 같은 색 계열을 모양으로 가른 경우 (2026-10-20)
+                ls_ = s_.get("line_style")
+                if ls_ and ls_ != "solid":
+                    info.append(["선 모양", str(s_.get("name") or ""), LS.label(ls_)])
             for k, v in (meta or {}).items():
                 if isinstance(v, (str, int, float)):
                     info.append([k, v])

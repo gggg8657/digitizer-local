@@ -594,14 +594,22 @@ def _roi(box, shape, pad=0):
     return x0, y0, x1, y1
 
 
-def mask_for(a, color, tol, box, excludes=(), remove_lines=True):
+def mask_for(a, color, tol, box, excludes=(), remove_lines=True, blend=False):
     """그림 영역 안에서 색 ± 허용오차(RGB 거리) 픽셀. 축선(경계 2px)·제외 영역·긴 직선(격자선)은 뺀다.
-    색이 있는(검정·회색 아닌) 계열은 축선과 헷갈릴 일이 없으니 영역을 8px 넓혀 축에 걸친 표식도 온전히 잡는다."""
+    색이 있는(검정·회색 아닌) 계열은 축선과 헷갈릴 일이 없으니 영역을 8px 넓혀 축에 걸친 표식도 온전히 잡는다.
+    blend=True: 가는 선의 안티앨리어싱(색과 흰 바탕이 섞인 픽셀, 흰색 비율 70% 까지)도 넣는다 — 다른 두 색이 섞인 픽셀은 이 선 위에 없음."""
     colored = max(color) - min(color) > 60
     x0, y0, x1, y1 = _roi(box, a.shape, 8 if colored else 0)
     sub = a[y0:y1, x0:x1].astype(np.int32)
     c = np.asarray(color, np.int32)
     m = ((sub - c) ** 2).sum(axis=2) <= tol * tol
+    if blend and colored:
+        d = (255 - c).astype(np.float32)
+        v = (sub - c).astype(np.float32)
+        t = (v @ d) / float(d @ d)
+        perp = np.sqrt(np.maximum(0, (v * v).sum(axis=2) - (t ** 2) * float(d @ d)))
+        chs = sub.max(axis=2) - sub.min(axis=2)
+        m |= (t >= 0) & (t <= 0.7) & (perp <= min(0.4 * tol, 18.0)) & (chs >= 0.3 * (max(color) - min(color)))  # 옅은 회색 격자선은 아님
     for ex in excludes or ():
         ex0, ey0 = int(min(ex[0], ex[2])) - x0, int(min(ex[1], ex[3])) - y0
         ex1, ey1 = int(math.ceil(max(ex[0], ex[2]))) - x0, int(math.ceil(max(ex[1], ex[3]))) - y0
@@ -610,6 +618,23 @@ def mask_for(a, color, tol, box, excludes=(), remove_lines=True):
         h, w = m.shape
         m[m.mean(axis=1) > 0.6, :] = False  # 가로 격자선·같은 색 직선
         m[:, m.mean(axis=0) > 0.6] = False
+        if max(color) - min(color) < 40:  # 검정·회색 점선·파선 격자선: 그림 폭 끝까지 고르게 끊긴 한 줄 (2026-10-20)
+            for mm in (m, m.T):
+                L_ = mm.shape[1]
+                for r in np.flatnonzero((mm.mean(axis=1) > 0.1) & (mm.mean(axis=1) <= 0.6)):
+                    rs = runs(mm[r])
+                    if len(rs) < 12:
+                        continue
+                    if rs[-1][1] - rs[0][0] < 0.6 * L_:  # 범례 상자에 가려 한쪽이 빈 줄도
+                        continue
+                    ln_ = np.array([e - s_ + 1 for s_, e in rs])
+                    st_ = np.array([s_ for s_, e in rs], float)
+                    d1, d2 = np.diff(st_), st_[2:] - st_[:-2]
+                    same = lambda v: float(np.mean(np.abs(v - np.median(v)) <= 0.15 * np.median(v) + 1))  # noqa: E731
+                    # 고르게 되풀이(점·대시 간격이 같거나, 둘씩 짝으로 같음) — 범례에 가린 큰 틈·가로지른 선 조각 몇 개는 봐 줌
+                    reg = same(d1) >= 0.75 or same(d2) >= 0.75
+                    if np.median(ln_) <= 12 and reg:
+                        mm[max(0, r - 1):r + 2] &= ~np.repeat(mm[r:r + 1], min(r + 2, mm.shape[0]) - max(0, r - 1), axis=0)
         for sl in (np.s_[:4, :], np.s_[-4:, :]):  # 테두리 가까이 남은 축선 조각(굵은·흐린 축선)
             sub = m[sl]
             sub[sub.mean(axis=1) > 0.25, :] = False
@@ -695,6 +720,36 @@ def suggest_colors(a, box, k=6):
     return [{"color": rgb2hex(c), "count": n} for c, n in keep]
 
 
+def wanted_neutral(a, box, legend, colors, excludes=()):
+    """범례에 회색·검정 계열이 있는데 색 후보에 무채색이 없으면(회색 선이 가까운 보라 무리에 합쳐짐) 그림 영역의 무채색 픽셀로 후보를 더한다 (2026-10-20)"""
+    wants = [hex2rgb(w) for w in (color_word(it.get("color")) for it in legend or []) if w]
+    bands = []
+    for lo, hi in ((0, 80), (80, 215)):  # 검정 / 중간 회색 — 범례가 그 띠의 무채색을 원하는데 후보에 없을 때만
+        if any(max(w) - min(w) < 20 and lo <= max(w) < hi for w in wants) and not any(
+                max(hex2rgb(c["color"])) - min(hex2rgb(c["color"])) < 20 and lo <= max(hex2rgb(c["color"])) < hi for c in colors):
+            bands.append((lo, hi))
+    if not bands:
+        return colors
+    x0, y0, x1, y1 = _roi(box, a.shape)
+    sub = a[y0:y1, x0:x1].astype(np.int16)
+    if not sub.size:
+        return colors
+    ink = gray(sub) < 235
+    lines = np.zeros(ink.shape, bool)
+    lines[ink.mean(axis=1) > 0.5, :] = True
+    lines[:, ink.mean(axis=0) > 0.5] = True
+    for ex in excludes or ():  # 범례 상자(글자 가장자리 회색)
+        lines[max(0, int(ex[1]) - y0):max(0, int(ex[3]) - y0 + 1), max(0, int(ex[0]) - x0):max(0, int(ex[2]) - x0 + 1)] = True
+    mx, mn = sub.max(2), sub.min(2)
+    for lo, hi in bands:
+        k = (mx - mn < 15) & (mx >= lo) & (mx < hi) & ~lines
+        if k.sum() >= 40:  # 선 속(가장 진한 쪽 4분위) 색 — 옅은 원자료 흔적·번짐에 끌리지 않게
+            v = mx[k]
+            core = k & (mx <= np.percentile(v, 25) + 6)
+            colors = list(colors) + [{"color": rgb2hex(sub[core].mean(axis=0)), "count": int(k.sum())}]
+    return colors
+
+
 COLOR_WORDS = {"red": "#d62728", "빨강": "#d62728", "빨간": "#d62728", "blue": "#1f77b4", "파랑": "#1f77b4", "파란": "#1f77b4",
                "green": "#2ca02c", "초록": "#2ca02c", "녹색": "#2ca02c", "orange": "#ff7f0e", "주황": "#ff7f0e",
                "black": "#000000", "검정": "#000000", "검은": "#000000", "purple": "#9467bd", "보라": "#9467bd",
@@ -713,8 +768,43 @@ def color_word(s):
     return None
 
 
+def _chroma(rgb):
+    return max(rgb) - min(rgb)
+
+
 def match_legend(legend, suggestions):
-    """범례(이름·색 단어) ↔ 검출한 색 후보 짝짓기 (가까운 색 순, 중복 없이)"""
+    """범례(이름·색 단어) ↔ 검출한 색 후보 짝짓기 (가까운 색 순, 중복 없이).
+    같은 색인데 선 모양·표식만 다른 범례 줄(흑백 논문·'실선 = A, 파선 = B')은 같은 후보 색을 함께 쓴다 (2026-10-20)."""
+    wants = [color_word(it.get("color")) for it in legend]
+    rep, reps = {}, []
+    for i, w in enumerate(wants):
+        r_ = None
+        if w:
+            for r in reps:
+                if wants[r] and np.sqrt(((np.array(hex2rgb(w), float) - np.array(hex2rgb(wants[r]), float)) ** 2).sum()) < 30:
+                    st_i = (str(legend[i].get("style") or "").lower(), str(legend[i].get("marker") or "").lower())
+                    st_r = (str(legend[r].get("style") or "").lower(), str(legend[r].get("marker") or "").lower())
+                    if st_i != st_r:
+                        r_ = r
+                        break
+        if r_ is None:
+            reps.append(i)
+            rep[i] = i
+        else:
+            rep[i] = r_
+    if len(reps) < len(legend):
+        sub = _match_legend([legend[r] for r in reps], suggestions)
+        by = {r: sub[k] for k, r in enumerate(reps)}
+        out = []
+        for i, it in enumerate(legend):
+            o = dict(by[rep[i]])
+            o.update(name=it.get("name") or "", style=it.get("style") or "", marker=it.get("marker") or "", axis=it.get("axis") or "")
+            out.append(o)
+        return out + sub[len(reps):]
+    return _match_legend(legend, suggestions)
+
+
+def _match_legend(legend, suggestions):
     out, used = [], set()
     # 범례 색 ↔ 후보 색: 차례로 가장 가까운 것을 집으면(탐욕) 비슷한 두 색(갈색·적갈색)이 엇갈릴 수 있어, 전체 거리 합이 가장 작은 짝을 먼저 찾는다
     wants = [color_word(it.get("color")) for it in legend]
@@ -725,6 +815,8 @@ def match_legend(legend, suggestions):
         Wc = np.array([hex2rgb(wants[i]) for i in idx], float)
         Sc = np.array([hex2rgb(s_["color"]) for s_ in suggestions], float)
         Dm = np.sqrt(((Wc[:, None] - Sc[None]) ** 2).sum(-1))
+        # 회색·검정 범례 ↔ 채도 높은 후보는 짝이 아님 (회색 계열을 파랑 후보에 붙이지 않게)
+        Dm = Dm + 200 * ((Wc.max(1) - Wc.min(1) < 20)[:, None] & (Sc.max(1) - Sc.min(1) > 80)[None])
         best_ = None
         k_ = min(len(idx), len(suggestions))
         for rows in itertools.combinations(range(len(idx)), k_):
@@ -748,7 +840,10 @@ def match_legend(legend, suggestions):
             for i, s in enumerate(suggestions):
                 if i in used:
                     continue
-                d = np.sqrt(((np.array(hex2rgb(s["color"]), float) - w) ** 2).sum())
+                sc_ = np.array(hex2rgb(s["color"]), float)
+                if _chroma(w) < 20 and _chroma(sc_) > 80:
+                    continue
+                d = np.sqrt(((sc_ - w) ** 2).sum())
                 if best is None or d < best[0]:
                     best = (d, i)
         if best and best[0] < 160:
@@ -1220,7 +1315,7 @@ def run_series(a, calib, box, s, excludes=(), legends=None):
     ex = list(excludes or ())
     if s.get("skip_legend", True):
         ex += find_legend_boxes(a, box) if legends is None else legends
-    m, off = mask_for(a, color, tol, box, ex, s.get("remove_lines", True))
+    m, off = mask_for(a, color, tol, box, ex, s.get("remove_lines", True), blend=bool(s.get("blend")) and s.get("mode") != "points")
     warn = []
     if not m.any():
         return {"px": [], "data": [], "warn": ["이 색의 픽셀이 영역 안에 없습니다 — 색·허용오차·영역을 확인"], "mask": m, "off": off}
@@ -1381,12 +1476,33 @@ def split_line_markers(a, calib, box, color, legends=None, tol=60, n=50):
     return {"markers": pts, "line": line}
 
 
-def auto_series(a, calib, box, color, legends=None, tol=60, n=50, hint=None):
+def blend_helps(a, color, tol, box, legends=None):
+    """가는 선이 흰 바탕과 섞여 색 마스크가 띄엄띄엄(열 70% 미만)인데 섞인 픽셀을 넣으면 확 이어지면 True (2026-10-20)"""
+    col = hex2rgb(color) if isinstance(color, str) else tuple(color)
+    if max(col) - min(col) <= 60:
+        return False
+    m0, _ = mask_for(a, col, tol, box, legends or [])
+    if m0.sum() < 10:
+        return False
+    lens = [r[1] - r[0] + 1 for c in range(0, m0.shape[1], 2) for r in [runs(m0[:, c])] if len(r) == 1 for r in r]
+    if lens and float(np.median(lens)) > 1.5:  # 가는 선(1px 남짓)만 — 굵은 선이 다른 선에 가려 끊긴 것은 아님
+        return False
+    m1, _ = mask_for(a, col, tol, box, legends or [], blend=True)
+    c0 = np.flatnonzero(m0.any(axis=0))
+    lo, hi = int(np.percentile(c0, 3)), int(np.percentile(c0, 97))  # 떨어진 글자 조각이 x 범위를 넓히지 않게
+    if hi <= lo:
+        return False
+    cov0 = m0[:, lo:hi + 1].any(axis=0).mean()
+    cov1 = m1[:, lo:hi + 1].any(axis=0).mean()
+    return bool(cov0 < 0.75 and cov1 >= cov0 + 0.15 and m1.mean() < 0.1)
+
+
+def auto_series(a, calib, box, color, legends=None, tol=60, n=50, hint=None, blend=False, remove_lines=True):
     """추출 방식 자동 선택 — 화면에서 ▶ 추출을 따로 누르지 않아도 되게.
     선(열마다 이어짐) / 점(띄엄띄엄 표식) / 선+표식(표식 = 실제 데이터 점 → 표식 중심을 씀) 을 마스크 모양으로 가른다.
     hint: VLM 범례 모양('line'·'markers'·'dashed'), 참고만. → {mode, how, px, data, warn, kind}"""
-    s = dict(color=color, tol=tol)
-    ln = run_series(a, calib, box, dict(s, mode="line", how="all"), legends=legends)
+    s = dict(color=color, tol=tol, remove_lines=remove_lines)
+    ln = run_series(a, calib, box, dict(s, mode="line", how="all", blend=blend), legends=legends)
     pt = run_series(a, calib, box, dict(s, mode="points"), legends=legends)
     lpx, mk = ln["px"], pt["px"]
     warn = []
@@ -1631,3 +1747,112 @@ def marker_groups(a, calib, box, color, k, legends=None, tol=60):
         nm = "triangle" if abs(fm[1]) > 0.3 else ("diamond" if fm[0] < 1.3 else "square" if fm[0] > 1.85 else "circle")
         shape.append(("hollow " if fm[2] < 0.5 else "") + nm)
     return {"groups": [sorted(g_) for g_ in groups], "legend": sorted(leg, key=lambda t: t[1]), "shape": shape}
+
+
+def refine_legend_colors(a, box, series, legend):
+    """범례 색(AI 가 읽은 #rrggbb)과 짝지은 후보 색 다듬기 (2026-10-20).
+    1. 후보 색이 범례 색에서 멀고(> 45) 그림에 범례 색 가까운 픽셀이 충분하면(가는 선 묶음에서 후보에 안 든 색) 그 픽셀 평균으로.
+    2. 범례 색이 서로 다른(> 25) 두 계열이 같은(가까운, < 60) 후보 색에 붙으면 그 색 둘레 픽셀을 두 무리로 나눠(k-평균) 각자 색으로
+       — 비슷한 파랑 두 선. 나눈 계열에는 color_split=True.
+    그 밖은 그대로."""
+    if not legend or len(series) != len(legend):
+        return series
+    x0, y0, x1, y1 = _roi(box, a.shape)
+    sub = a[y0:y1, x0:x1].reshape(-1, 3).astype(np.float32)
+    if not len(sub):
+        return series
+    ch = sub.max(1) - sub.min(1)
+    wants = [color_word(it.get("color")) for it in legend]
+    used = [hex2rgb(s["color"]) if s.get("color") else None for s in series]
+    for i, (s, w) in enumerate(zip(series, wants)):
+        if not w or not s.get("color") or not str(w).startswith("#"):
+            continue
+        W_ = np.array(hex2rgb(w), np.float32)
+        C_ = np.array(hex2rgb(s["color"]), np.float32)
+        if np.sqrt(((W_ - C_) ** 2).sum()) <= 45 or W_.max() - W_.min() < 60:
+            continue
+        d = np.sqrt(((sub - W_) ** 2).sum(1))
+        k = (d < 40) & (ch > 0.6 * (W_.max() - W_.min()))
+        if k.sum() < 40:
+            continue
+        kc = (np.sqrt(((sub - C_) ** 2).sum(1)) < 40)
+        dcur = float(np.sqrt(((C_ - W_) ** 2).sum()))
+        stolen = any(j != i and w2 and float(np.sqrt(((C_ - np.array(hex2rgb(w2), np.float32)) ** 2).sum())) < dcur - 10
+                     for j, w2 in enumerate(wants))  # 지금 색이 다른 범례 줄의 색에 더 가까움 — 남의 색을 잡음
+        if not stolen and k.sum() < 2 * kc.sum():  # 지금 색도 그림에 충분히 있음 — AI 가 읽은 색이 어림일 뿐
+            continue
+        mean = sub[k].mean(0)
+        if any(j != i and u is not None and np.sqrt(((np.array(u, np.float32) - mean) ** 2).sum()) < 30 for j, u in enumerate(used)):
+            continue
+        s["color"] = rgb2hex(mean)
+        used[i] = tuple(mean)
+    return series
+
+
+def refine_free(series, legend, colors):
+    """1b. 다듬은 뒤 남는 후보 색이 범례 색에 훨씬 가까우면 그 색으로 (회색 범례가 검정 후보에 붙어 있던 것)"""
+    wants = [color_word(it.get("color")) for it in legend or []]
+    if len(wants) != len(series):
+        return series
+    for i, (s, w) in enumerate(zip(series, wants)):
+        if not w or not s.get("color"):
+            continue
+        W_ = np.array(hex2rgb(w), float)
+        cur = np.sqrt(((np.array(hex2rgb(s["color"]), float) - W_) ** 2).sum())
+        if cur <= 45:
+            continue
+        taken = [np.array(hex2rgb(t["color"]), float) for t in series if t.get("color")]
+        best = None
+        for c in colors or []:
+            C_ = np.array(hex2rgb(c["color"]), float)
+            if any(np.sqrt(((C_ - t) ** 2).sum()) < 25 for t in taken):
+                continue
+            d = np.sqrt(((C_ - W_) ** 2).sum())
+            if d < 45 and d < 0.5 * cur and (best is None or d < best[0]):
+                best = (d, c["color"])
+        if best:
+            s["color"] = best[1]
+    return series
+
+
+def refine_similar(a, box, series, legend):
+    if not legend or len(series) != len(legend):
+        return series
+    x0, y0, x1, y1 = _roi(box, a.shape)
+    sub = a[y0:y1, x0:x1].reshape(-1, 3).astype(np.float32)
+    if not len(sub):
+        return series
+    ch = sub.max(1) - sub.min(1)
+    wants = [color_word(it.get("color")) for it in legend]
+    # 2. 비슷한 색 둘
+    for i in range(len(series)):
+        for j in range(i + 1, len(series)):
+            si, sj = series[i], series[j]
+            wi, wj = wants[i], wants[j]
+            if not (wi and wj and si.get("color") and sj.get("color")):
+                continue
+            Wi, Wj = np.array(hex2rgb(wi), np.float32), np.array(hex2rgb(wj), np.float32)
+            Ci, Cj = np.array(hex2rgb(si["color"]), np.float32), np.array(hex2rgb(sj["color"]), np.float32)
+            if np.sqrt(((Wi - Wj) ** 2).sum()) <= 25 or np.sqrt(((Ci - Cj) ** 2).sum()) >= 60:
+                continue
+            if str(si.get("style") or "").lower() != str(sj.get("style") or "").lower() or str(si.get("marker") or "").lower() != str(sj.get("marker") or "").lower():
+                continue  # 모양이 다르면 같은 색 모양 가르기 쪽
+            c0 = (Ci + Cj) / 2
+            cmx = max(Ci.max() - Ci.min(), Cj.max() - Cj.min())
+            k = (np.sqrt(((sub - c0) ** 2).sum(1)) < 60) & (ch > 0.8 * cmx)
+            X = sub[k]
+            if len(X) < 60:
+                continue
+            cen = np.stack([Wi, Wj])
+            for _ in range(20):
+                lab = np.argmin(((X[:, None] - cen[None]) ** 2).sum(-1), 1)
+                new = np.stack([X[lab == q].mean(0) if (lab == q).any() else cen[q] for q in (0, 1)])
+                if np.allclose(new, cen, atol=0.5):
+                    break
+                cen = new
+            n0, n1 = (lab == 0).sum(), (lab == 1).sum()
+            if np.sqrt(((cen[0] - cen[1]) ** 2).sum()) < 18 or min(n0, n1) < 0.2 * len(X):
+                continue
+            si["color"], sj["color"] = rgb2hex(cen[0]), rgb2hex(cen[1])
+            si["color_split"] = sj["color_split"] = True
+    return series
