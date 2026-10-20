@@ -1516,6 +1516,14 @@ def export(calib, series, fmt="csv", meta=None, bars=None, orient="v", calib2=No
                 info.append([f"{k}축", "로그" if c.get("log") else "선형", "점1(px)", *c["p1"], "값1", c["v1"], "점2(px)", *c["p2"], "값2", c["v2"]]
                             + (["상대값 (실제 값 아님: 가장 높은 격자선 또는 막대 = 100)"] if c.get("relative") else [])
                             + ([f"배수 ×10^{c['mult']} 적용"] if c.get("mult") else []))
+            # 원본 그림의 계열 색 — 다른 도구(그래프 chart-local)가 '원본 그림 색' 프로필로 쓴다. ['계열 색', 데이터 시트 계열 이름, '#rrggbb']
+            seen_ = set()
+            for i, s_ in enumerate(list(series) + list(lines or [])):
+                c_ = str(s_.get("color") or "")
+                nm_ = str(s_.get("name") or (f"계열 {i + 1}" if bars else f"계열{i + 1}"))
+                if re.fullmatch(r"#[0-9a-fA-F]{6}", c_) and nm_ not in seen_:
+                    seen_.add(nm_)
+                    info.append(["계열 색", nm_, c_.lower()])
             for k, v in (meta or {}).items():
                 if isinstance(v, (str, int, float)):
                     info.append([k, v])

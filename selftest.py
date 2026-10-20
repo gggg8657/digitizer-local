@@ -245,7 +245,7 @@ try:
     assert len(ex["data"]) == 21 and ex["mask"].startswith("data:image/png;base64,")
     # 화면 흐름과 같게: 데이터 → 픽셀로 되돌려 저장 → 내보낼 때 다시 데이터
     PX, PY = D.to_pixel(calib, [p[0] for p in ex["data"]], [p[1] for p in ex["data"]])
-    ser = [{"name": "sin", "px": list(zip(PX.tolist(), PY.tolist()))}, {"name": "수동", "px": [[400.5, 260.5], [200.5, 100.5]]}]
+    ser = [{"name": "sin", "color": "#1F77B4", "px": list(zip(PX.tolist(), PY.tolist()))}, {"name": "수동", "px": [[400.5, 260.5], [200.5, 100.5]]}]
     body, name, ctype = app.export(calib, ser, "csv", {"name": "그림 3"})
     txt = body.decode("utf-8-sig")
     rows = list(__import__("csv").reader(io.StringIO(txt)))
@@ -257,6 +257,8 @@ try:
         import openpyxl
         wb = openpyxl.load_workbook(io.BytesIO(body))
         assert name == "g.xlsx" and wb.sheetnames == ["데이터", "sin", "수동", "보정"] and wb["데이터"].max_row == 22
+        colors_ = [list(r_)[:3] for r_ in wb["보정"].iter_rows(values_only=True) if r_[0] == "계열 색"]
+        assert colors_ == [["계열 색", "sin", "#1f77b4"]], colors_  # 색 없는 계열(수동)은 줄 없음
     else:
         assert name == "g.csv"
     pid = app.save_project({"name": "그림 3", "image": info, "calib": calib, "box": r["detect"]["box"], "series": ser})
@@ -375,6 +377,8 @@ try:
             body, name, _ = app.export(bb["calib"], bb["series"], "xlsx", {"name": "막대"}, bb["bars"], bb["orient"])
             wb = openpyxl.load_workbook(io.BytesIO(body))
             assert wb.sheetnames == ["데이터", "막대 조각", "보정"] and wb["막대 조각"].max_row == 13
+            colors_ = {r_[1]: r_[2] for r_ in wb["보정"].iter_rows(values_only=True) if r_[0] == "계열 색"}
+            assert set(colors_) == {"S1", "S2", "S3"} and all(re.fullmatch(r"#[0-9a-f]{6}", c) for c in colors_.values()), colors_
         # VLM 이 차트 종류를 말하지 않아도: x 눈금이 없고 막대가 있으면 막대 모드로 전환하고 이유를 알림
         app.chat_vision = lambda p, i, m=None: (json.dumps({"labels": {}}) if "numbered row" in p or "chart legend" in p else
                                                 json.dumps({"bars": {}}) if "magenta tag" in p else
