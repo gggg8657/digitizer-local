@@ -468,6 +468,158 @@ try:
         assert head == ["범주", "Plan", "Actual"] and [q[0] for q in rows] == ["2021", "2022", "2023", "2024"], (head, rows)
         assert max(abs(q[1] - tr["rows"][q[0]][0]) + abs(q[2] - tr["rows"][q[0]][1]) for q in rows) < 0.4, rows
 
+    # 11) 2026-10-19 개선: 지원 안 하는 그림 거절 · 축선 없는 차트(단위 붙은 눈금) · 점선/교차 · 오차막대 캡 · 같은 색 선/표식 · 기울기
+    from PIL import Image as _Im
+
+    def corner_err(r, tr):
+        """자동 보정의 그림 영역 모서리 오차 (축 범위 대비 %)"""
+        cal = r["detect"]["calib"]
+        bx = tr["box"]
+        P = np.array([[bx["x0"], bx["y1"]], [bx["x1"], bx["y0"]]], float)
+        ta, tb = D.to_data(tr["calib"], P[:, 0], P[:, 1])
+        aa, ab = D.to_data(cal, P[:, 0], P[:, 1])
+        return max(np.max(np.abs(aa - ta)) / abs(ta[1] - ta[0]), np.max(np.abs(ab - tb)) / abs(tb[1] - tb[0])) * 100
+
+    def ser_err(r, name, s_true):
+        """뽑은 계열 ↔ 참 계열: (y 최대 오차 % of y 범위, x 범위 덮은 비율)"""
+        g = next(x for x in r["detect"]["series"] if x["name"] == name)
+        d = np.asarray(app.series_data(g.get("calib") or r["detect"]["calib"], g), float)
+        tx, ty = np.asarray(s_true["x"], float), np.asarray(s_true["y"], float)
+        yr = abs(r["detect"]["calib"]["y"]["v2"] - r["detect"]["calib"]["y"]["v1"])
+        if s_true["kind"] == "line":
+            e = np.abs(d[:, 1] - np.interp(d[:, 0], tx, ty)) / yr * 100
+        else:
+            e = np.array([np.min(np.hypot((tx - x) / (tx.max() - tx.min()), (ty - y) / yr)) for x, y in d]) * 100
+        cov = (d[:, 0].max() - d[:, 0].min()) / (tx.max() - tx.min())
+        return float(e.max()), float(cov), g
+
+    def vlm_with(main, rows=None):
+        """가짜 VLM: 전체 읽기 → main, 글자 덩어리 읽기 → rows(덩어리 수 → 값 목록) 또는 빈 답"""
+        def f(prompt, images, model=None):
+            if "numbered row" in prompt:
+                n = (_Im.open(io.BytesIO(images[0])).height - 10) // 60
+                vals = (rows or {}).get(n)
+                return json.dumps({"labels": {str(i + 1): v for i, v in enumerate(vals)} if vals else {}})
+            return json.dumps(main)
+        return f
+
+    assert [app.num(v) for v in ("90 years", "$5,000", "40%", "1.2k", "1E-10", "×10³", "25 t", "€1.5M", "-$3", "100만")] == \
+        [90, 5000, 40, 1200, 1e-10, 1000, 25, 1.5e6, -3, 1e6]
+    for bad in ("Q1", "Farmer A", "2020-2021", "B"):
+        try:
+            app.num(bad)
+            raise AssertionError(f"범주 글자 {bad!r} 를 숫자로 읽음")
+        except ValueError:
+            pass
+
+    # 지원하지 않는 그림: 규칙만(AI 없이)으로도 파이·도넛 거절, AI 판정 + 규칙, '그래도 자동 보정'(force)
+    for donut in (False, True):
+        info = app.save_image(S.pie_chart(donut=donut))
+        r = app.auto(info["id"], use_vlm=False)
+        assert r["code"] == "unsupported_chart" and r["unsupported"]["kind"] == "pie" and "지원하지 않는 형식" in r["message"], (donut, r["message"])
+        app.chat_vision = vlm_with({"x_ticks": [], "y_ticks": [], "legend": [], "chart_type": "pie"})
+        r = app.auto(info["id"])
+        assert r["code"] == "unsupported_chart" and r["unsupported"]["label"].startswith("파이"), r["message"]
+        r = app.auto(info["id"], force=True)
+        assert r["code"] is None, r["message"]
+    ROWS.append(("거절-파이·도넛", "규칙+AI", 2, 0.0, float("nan"), 0.0, None))
+
+    # 축선 없는 웹 차트(OWID 꼴): 연한 파선 격자 끝 = 그림 영역, '90 years' 단위 붙은 눈금, 안쪽으로 당긴 끝 글자
+    png, tr = S.web_chart()
+    info = app.save_image(png)
+    app.chat_vision = vlm_with({"x_ticks": [str(v) for v in tr["xticks"]], "y_ticks": [f"{v} years" for v in tr["yticks"]], "chart_type": "line",
+                                "legend": [{"name": "Japan", "color": "#c48c4c", "style": "line"}, {"name": "India", "color": "#2d78a0", "style": "line"}]},
+                               {8: [str(v) for v in tr["xticks"]], 10: [f"{v} years" for v in tr["yticks"]]})
+    r = app.auto(info["id"])
+    assert r["detect"]["calib"] and r["detect"]["axes"].get("frame_src") == "grid", r["message"]
+    ce = corner_err(r, tr)
+    assert ce < 0.5, f"웹 차트 보정 오차 {ce:.2f}%"
+    for s_ in tr["series"]:
+        e, cov, _ = ser_err(r, s_["name"], s_)
+        assert e < 1.0 and cov > 0.9, (s_["name"], e, cov)
+        ROWS.append(("축선없음-웹차트", s_["name"], 50, ce, float("nan"), e, None))
+
+    if app._has("matplotlib"):
+        # 회색 바탕(ggplot·seaborn)·fivethirtyeight: 축선 없음 → 바탕 사각형·격자선으로 그림 영역
+        for st in ("ggplot", "seaborn-v0_8-darkgrid", "fivethirtyeight"):
+            try:
+                png, tr = S.styled_lines(st)
+            except OSError:
+                continue
+            info = app.save_image(png)
+            app.chat_vision = vlm_with({"x_ticks": tr["xticks"], "y_ticks": tr["yticks"], "chart_type": "line",
+                                        "legend": [{"name": "decay", "color": "#e24a33"}, {"name": "growth", "color": "#348abd"}]})
+            r = app.auto(info["id"])
+            assert r["detect"]["calib"], (st, r["message"])
+            ce = corner_err(r, tr)
+            assert ce < 0.5, f"{st} 보정 오차 {ce:.2f}%"
+            for s_ in tr["series"]:
+                e, cov, _ = ser_err(r, s_["name"], s_)
+                assert e < 1.5 and cov > 0.9, (st, s_["name"], e, cov)
+            ROWS.append((f"축선없음-{st[:14]}", "2계열", 50, ce, float("nan"), e, None))
+
+        # 컬러바 붙은 산점도: AI 가 '히트맵'이라 해도 규칙(그림 영역이 색 칸으로 차지 않음)으로 거절하지 않음 + 컬러바는 그림 영역 밖
+        png, tr = S.colorbar_scatter()
+        info = app.save_image(png)
+        app.chat_vision = vlm_with({"x_ticks": tr["xticks"], "y_ticks": tr["yticks"], "chart_type": "heatmap", "legend": []})
+        r = app.auto(info["id"])
+        assert r["code"] is None and r["detect"]["calib"] and any("AI 는" in w for w in r["detect"]["warn"]), (r["message"], r["detect"].get("warn"))
+        assert r["detect"]["box"]["x1"] < tr["box"]["x1"] + 3, ("컬러바를 그림 영역으로 잡음", r["detect"]["box"])
+
+        # 실선·파선·점선이 서로 가로지름: 점선 틈을 잇고 교차점에서 계열을 바꾸지 않음
+        png, tr = S.dashed_lines()
+        info = app.save_image(png)
+        app.chat_vision = vlm_with({"x_ticks": tr["xticks"], "y_ticks": tr["yticks"], "chart_type": "line",
+                                    "legend": [{"name": s_["name"], "color": s_["color"], "style": "dashed" if s_["ls"] != "-" else "line"} for s_ in tr["series"]]})
+        r = app.auto(info["id"])
+        for s_ in tr["series"]:
+            e, cov, g = ser_err(r, s_["name"], s_)
+            assert g["kind"] == "line" and e < 1.5 and cov > 0.9, (s_["name"], g["kind"], e, cov)
+            ROWS.append(("점선·파선-교차", s_["name"], len(g["px"]), corner_err(r, tr), float("nan"), e, None))
+
+        # 같은 색 오차막대(줄기·캡)가 달린 빈 원: 캡·줄기는 점이 아님
+        png, tr = S.errorbar_hollow()
+        info = app.save_image(png)
+        app.chat_vision = vlm_with({"x_ticks": tr["xticks"], "y_ticks": tr["yticks"], "chart_type": "scatter",
+                                    "legend": [{"name": "run", "color": "#ff7f0e", "style": "markers", "marker": "circle"}]})
+        r = app.auto(info["id"])
+        e, cov, g = ser_err(r, "run", tr["series"][0])
+        assert len(g["px"]) == 8 and e < 1.0, (len(g["px"]), e, g.get("warn"))
+        ROWS.append(("오차막대-빈원", "run", 8, corner_err(r, tr), float("nan"), e, None))
+
+        # 흑백: 같은 색의 모형 곡선(표식 없음) + 실험 점(빈 원), 테두리 없는 범례
+        png, tr = S.bw_model_exp()
+        info = app.save_image(png)
+        app.chat_vision = vlm_with({"x_ticks": tr["xticks"], "y_ticks": tr["yticks"], "chart_type": "line",
+                                    "legend": [{"name": "model", "color": "black", "style": "line", "marker": "none"},
+                                               {"name": "exp.", "color": "black", "style": "markers", "marker": "circle"}]})
+        r = app.auto(info["id"])
+        e1, c1, g1 = ser_err(r, "model", tr["series"][0])
+        e2, c2, g2 = ser_err(r, "exp.", tr["series"][1])
+        assert g1["kind"] == "line" and e1 < 1.5 and c1 > 0.8, ("model", g1["kind"], e1, c1)
+        assert g2["kind"] == "points" and 9 <= len(g2["px"]) <= 11 and e2 < 1.0, ("exp.", g2["kind"], len(g2["px"]), e2)
+        ROWS.append(("같은색-선/표식", "model·exp.", len(g2["px"]), corner_err(r, tr), float("nan"), max(e1, e2), None))
+
+    # 기울어진 스캔(1.5°): 축선 각도로 바로 세우고 결과에 각도를 남김
+    png, tr = S.pillow_plot([dict(name="sin", color=(31, 119, 180), kind="line", x=xs, y=np.sin(xs)),
+                             dict(name="cos", color=(214, 39, 40), kind="line", x=xs, y=0.6 * np.cos(xs))],
+                            (0, 10), (-1.5, 1.5), [0, 2, 4, 6, 8, 10], [-1.5, -1, -0.5, 0, 0.5, 1, 1.5])
+    rb = io.BytesIO()
+    _Im.open(io.BytesIO(png)).rotate(1.5, resample=_Im.BICUBIC, expand=True, fillcolor="white").save(rb, "PNG")
+    info = app.save_image(rb.getvalue())
+    app.chat_vision = vlm_with({"x_ticks": tr["xticks"], "y_ticks": tr["yticks"], "chart_type": "line",
+                                "legend": [{"name": "sin", "color": "blue"}, {"name": "cos", "color": "red"}]})
+    r = app.auto(info["id"])
+    assert r["deskew"] and abs(r["deskew"]["angle"] - 1.5) < 0.15 and r["deskew"]["image"]["id"] != info["id"], r.get("deskew")
+    assert app.image_meta(r["deskew"]["image"]["id"]).get("deskew") == r["deskew"]["angle"]
+    assert "바로 세운" in r["message"]
+    for s_ in tr["series"]:
+        e, cov, _ = ser_err(r, s_["name"], s_)
+        assert e < 1.0 and cov > 0.9, ("기울기", s_["name"], e, cov)
+    ROWS.append((f"기울기{r['deskew']['angle']:.2f}°-바로세움", "2계열", 50, 0.0, float("nan"), e, None))
+    r2 = app.auto(r["deskew"]["image"]["id"])  # 바로 세운 그림을 다시 넣으면 또 돌리지 않음
+    assert r2["deskew"] is None
+
     # 8) 폐쇄망: 외부 CDN 없음, 저작권 표기
     ui = app.read(os.path.join(app.ROOT, "ui.html"))
     assert not re.search(r'<(script|link|img)[^>]+(src|href)="https?://', ui), "외부 CDN 참조 있음"

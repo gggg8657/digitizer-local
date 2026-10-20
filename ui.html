@@ -322,18 +322,30 @@ async function doCrop(r) {
 $('undoCrop').onclick = async () => { if (!prevImg) return; const name = S.name; S = blank(); S.name = name; await setImage(prevImg, true); $('undoCrop').hidden = true; };
 
 // ── 축 보정 ─────────────────────────────────────────────────────────
-async function autoCal(useVlm = true, xvals = null, yvals = null) {
+async function autoCal(useVlm = true, xvals = null, yvals = null, force = false) {
   if (!S.img) return;
   const msg = $('autoMsg'); msg.innerHTML = `<span class="hint">${useVlm ? 'AI 가 눈금 숫자·범례를 읽는 중… (10~60초)' : '축·눈금 찾는 중…'}</span>`;
   $('autoBtn').disabled = true;
   try {
-    const body = { id: S.img.id, vlm: useVlm, model: $('model').value || null, xvals, yvals, chart: $('chart').value };
+    const body = { id: S.img.id, vlm: useVlm, model: $('model').value || null, xvals, yvals, chart: $('chart').value, force };
     let r;
     try { r = await api('auto', body); }
     catch (e) { if (!/응답 없음|Failed to fetch|NetworkError|502|504/.test(e.message)) throw e;  // 서버·AI 가 잠깐 바쁠 때 한 번 더
       msg.innerHTML = '<span class="hint">서버 응답이 끊겨 한 번 더 시도하는 중…</span>'; await new Promise(ok => setTimeout(ok, 3000)); r = await api('auto', body); }
+    if (r.deskew && r.deskew.image && r.deskew.image.id !== S.img.id) {  // 기울어진 스캔: 서버가 바로 세운 그림으로 바꿔 처리 — 화면도 그 그림으로
+      await setImage(r.deskew.image, false);
+      $('imgInfo').innerHTML += ` — 기울기 ${Math.abs(r.deskew.angle).toFixed(1)}°를 바로 세움`;
+    }
     if (r.need_panel) { showPanels(r.panels, r.message); msg.innerHTML = `<span class="warn">${esc(r.message)}</span>`; showTab('tImg'); return; }
     showPanels(null);
+    if (r.code === 'unsupported_chart') {  // 3D·극좌표·파이·히트맵·등고선 등 — 자동 추출을 멈추고 안내 (수동 보정·강제 진행은 남김)
+      const u = r.unsupported || {};
+      msg.innerHTML = `<div class="err">⛔ ${esc(r.message)}</div>` + (u.why && u.why.length ? `<div class="hint">근거: ${esc(u.why.join(', '))}</div>` : '') +
+        `<div class="row"><button id="forceAuto" title="거절을 무시하고 축·눈금 검출과 추출을 그대로 해 봅니다">그래도 자동 보정</button></div>` +
+        `<div class="hint">직교 축이 있다면 아래 수동 보정(축 위 X1·X2·Y1·Y2 클릭)으로 직접 진행할 수 있습니다.</div>`;
+      $('forceAuto').onclick = () => autoCal(useVlm, xvals, yvals, true);
+      return;
+    }
     const d = r.detect || r;
     if (!d.ok) { msg.innerHTML = `<span class="err">${esc(r.message || d.error)}</span>`; return; }
     S.det = { ticks: d.ticks, labels: d.labels, colors: d.colors || [], series: d.series || [], legend_boxes: d.legend_boxes || [], vlm: r.vlm || null, fit: d.fit || null, calib2: d.calib2 || null };

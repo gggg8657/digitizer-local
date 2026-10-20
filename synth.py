@@ -354,3 +354,169 @@ def grouped_bars(dpi=110):
     fig.savefig(b, format="png", dpi=dpi)
     plt.close(fig)
     return b.getvalue(), {"rows": {"2021": (12, 8), "2022": (15, 11), "2023": (9, 14), "2024": (20, 6)}, "ticks": [0, 2.5, 5, 7.5, 10, 12.5, 15, 17.5, 20]}
+
+
+# ── 2026-10-19 개선 시험용 (거절·축선 없는 차트·점선·같은 색 선/표식·오차막대·기울기) ─────────────────
+def _mpl_truth(fig, ax, series, xlog=False, ylog=False, dpi=100):
+    """matplotlib 그림 → (PNG, 참값) — mpl_plot 과 같은 규칙"""
+    import matplotlib.pyplot as plt
+    fig.canvas.draw()
+    H = fig.canvas.get_width_height()[1]
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    T = ax.transData
+
+    def pix(x, y):
+        a, b = T.transform((x, y))
+        return [float(a), float(H - b)]
+    calib = {"x": {"p1": pix(x0, y0), "p2": pix(x1, y0), "v1": x0, "v2": x1, "log": xlog},
+             "y": {"p1": pix(x0, y0), "p2": pix(x0, y1), "v1": y0, "v2": y1, "log": ylog}}
+    bb = ax.get_window_extent()
+    xt = [float(t) for t in ax.get_xticks() if min(x0, x1) <= t <= max(x0, x1)]
+    yt = [float(t) for t in ax.get_yticks() if min(y0, y1) <= t <= max(y0, y1)]
+    b = io.BytesIO()
+    fig.savefig(b, format="png", dpi=dpi)
+    plt.close(fig)
+    return b.getvalue(), {"calib": calib, "box": {"x0": bb.x0, "y0": H - bb.y1, "x1": bb.x1, "y1": H - bb.y0},
+                          "series": series, "xticks": xt, "yticks": yt}
+
+
+def styled_lines(style="ggplot", dpi=100):
+    """축선 없는 회색 바탕(ggplot·seaborn darkgrid·fivethirtyeight) 2계열 — 축선·눈금선이 없거나 흰 격자만"""
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    xs = np.linspace(0, 20, 200)
+    series = [dict(name="decay", color="#e24a33", kind="line", x=xs, y=3 * np.exp(-xs / 7)),
+              dict(name="growth", color="#348abd", kind="line", x=xs, y=1 + 0.1 * xs)]
+    with plt.style.context(style):
+        fig, ax = plt.subplots(figsize=(7.68, 5.76), dpi=dpi)
+        for s in series:
+            ax.plot(s["x"], s["y"], color=s["color"], label=s["name"])
+        ax.legend(loc="lower left")
+        return _mpl_truth(fig, ax, series, dpi=dpi)
+
+
+def web_chart(size=(850, 600)):
+    """OWID 같은 웹 차트: 축선 없음, 연한 파선 가로 격자, 왼쪽 '90 years' 꼴 단위 붙은 눈금 글자(선 왼쪽 끝에 붙음),
+    아래 x 글자의 첫·끝 글자는 그림 안쪽으로 당겨 찍음, 제목·부제·출처 글자, 선 + 작은 점 표식 2계열 (Pillow)"""
+    import numpy as np
+    W, H = size
+    bx0, by0, bx1, by1 = 72, 110, 724, 532
+    xr, yr = (1950, 2020), (0, 90)
+    px = lambda x: bx0 + (x - xr[0]) / (xr[1] - xr[0]) * (bx1 - bx0)  # noqa: E731
+    py = lambda y: by1 - (y - yr[0]) / (yr[1] - yr[0]) * (by1 - by0)  # noqa: E731
+    im = Image.new("RGB", size, (255, 255, 255))
+    d = ImageDraw.Draw(im)
+    fn, ft = _font(14), _font(22)
+    d.text((16, 18), "Life expectancy", fill=(30, 30, 30), font=ft)
+    d.text((16, 56), "Period life expectancy at birth, years", fill=(90, 90, 90), font=fn)
+    for v in range(0, 91, 10):
+        y = round(py(v))
+        if v == 0:
+            d.line([(bx0, y), (bx1, y)], fill=(200, 200, 200), width=1)
+        else:
+            for x in range(bx0, bx1, 8):
+                d.line([(x, y), (min(bx1, x + 3), y)], fill=(225, 225, 225), width=1)
+        d.text((bx0 - 6, y), f"{v} years", fill=(90, 90, 90), font=fn, anchor="rm")
+    for v in range(1950, 2021, 10):
+        x = round(px(v))
+        anchor = "lt" if v == 1950 else "rt" if v == 2020 else "mt"
+        d.text((x, by1 + 9), str(v), fill=(90, 90, 90), font=fn, anchor=anchor)
+    xs = np.arange(1950, 2021)
+    series = [dict(name="Japan", color=(196, 140, 76), kind="line", x=xs, y=60 + 25 * (1 - np.exp(-(xs - 1950) / 25))),
+              dict(name="India", color=(45, 120, 160), kind="line", x=xs, y=41 + 0.42 * (xs - 1950))]
+    for s in series:
+        pts = [(px(x), py(y)) for x, y in zip(s["x"], s["y"])]
+        d.line(pts, fill=s["color"], width=2, joint="curve")
+        for x, y in pts[::2]:
+            d.ellipse([x - 2, y - 2, x + 2, y + 2], fill=s["color"])
+        d.text((bx1 + 6, pts[-1][1]), s["name"], fill=s["color"], font=fn, anchor="lm")
+    d.text((16, H - 30), "Data source: synthetic (selftest)", fill=(120, 120, 120), font=fn)
+    b = io.BytesIO()
+    im.save(b, "PNG")
+    calib = {"x": {"p1": [px(xr[0]) + 0.5, by1], "p2": [px(xr[1]) + 0.5, by1], "v1": xr[0], "v2": xr[1], "log": False},
+             "y": {"p1": [bx0, py(yr[0]) + 0.5], "p2": [bx0, py(yr[1]) + 0.5], "v1": yr[0], "v2": yr[1], "log": False}}
+    return b.getvalue(), {"calib": calib, "box": {"x0": bx0, "y0": by0, "x1": bx1, "y1": by1}, "series": series,
+                          "xticks": list(range(1950, 2021, 10)), "yticks": list(range(0, 91, 10))}
+
+
+def pie_chart(size=(640, 480), donut=False):
+    """파이·도넛 그래프 (거절 시험)"""
+    im = Image.new("RGB", size, "white")
+    d = ImageDraw.Draw(im)
+    cx, cy, r = 320, 240, 170
+    a0 = 0
+    for frac, col in ((0.15, (31, 119, 180)), (0.30, (255, 127, 14)), (0.45, (44, 160, 44)), (0.10, (214, 39, 40))):
+        d.pieslice([cx - r, cy - r, cx + r, cy + r], a0, a0 + 360 * frac, fill=col)
+        a0 += 360 * frac
+    if donut:
+        d.ellipse([cx - 90, cy - 90, cx + 90, cy + 90], fill="white")
+    b = io.BytesIO()
+    im.save(b, "PNG")
+    return b.getvalue()
+
+
+def colorbar_scatter(dpi=100):
+    """색 띠(컬러바)가 붙은 2D 산점도 — 지원하는 그림 (AI 가 히트맵이라 해도 거절하지 않아야 함)"""
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    rng = np.random.default_rng(3)
+    x, y = rng.random(30), rng.random(30)
+    fig, ax = plt.subplots(figsize=(7.68, 5.76), dpi=dpi)
+    sc = ax.scatter(x, y, c=x + y, cmap="viridis")
+    fig.colorbar(sc)
+    series = [dict(name="pts", color="#000000", kind="points", x=x, y=y)]
+    return _mpl_truth(fig, ax, series, dpi=dpi)
+
+
+def dashed_lines(dpi=100):
+    """실선·파선·점선 3계열이 서로 가로지름 (점선 틈 잇기·교차점 계열 유지 시험)"""
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    xs = np.linspace(0, 10, 300)
+    series = [dict(name="k=1", color="#1f77b4", kind="line", ls="-", x=xs, y=np.sqrt(xs)),
+              dict(name="k=1.5", color="#ff7f0e", kind="line", ls="--", x=xs, y=4.2 - 0.35 * xs),
+              dict(name="k=2", color="#2ca02c", kind="line", ls=":", x=xs, y=1 + 0.25 * xs)]
+    fig, ax = plt.subplots(figsize=(7.68, 5.76), dpi=dpi)
+    for s in series:
+        ax.plot(s["x"], s["y"], color=s["color"], ls=s["ls"], label=s["name"])
+    ax.legend(loc="lower center")
+    return _mpl_truth(fig, ax, series, dpi=dpi)
+
+
+def errorbar_hollow(dpi=100):
+    """같은 색 오차막대(줄기·캡)가 달린 빈 원 표식 — 캡·줄기를 점으로 잡지 않아야 함"""
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    x = np.arange(1, 9)
+    y = 6.7 - 0.3 * x
+    fig, ax = plt.subplots(figsize=(7.68, 5.76), dpi=dpi)
+    ax.errorbar(x, y, yerr=0.6, fmt="o", mfc="white", color="#ff7f0e", capsize=3, label="run")
+    ax.legend(loc="lower left")
+    series = [dict(name="run", color="#ff7f0e", kind="points", x=x, y=y)]
+    return _mpl_truth(fig, ax, series, dpi=dpi)
+
+
+def bw_model_exp(dpi=150):
+    """흑백 논문 그림: 검은 모형 곡선(표식 없음) + 같은 색 실험 점(빈 원), 테두리 없는 범례"""
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    xm = np.linspace(0, 1, 101)
+    xe = np.linspace(0.1, 0.9, 9)
+    series = [dict(name="model", color="#000000", kind="line", x=xm, y=100 * xm ** 2),
+              dict(name="exp.", color="#000000", kind="points", x=xe, y=100 * xe)]
+    fig, ax = plt.subplots(figsize=(7, 5.4), dpi=dpi)
+    ax.plot(xm, 100 * xm ** 2, color="black", lw=1.5, label="model")
+    ax.plot(xe, 100 * xe, ls="none", marker="o", mfc="white", mec="black", mew=1.5, ms=7, label="exp.")
+    ax.legend(loc="upper left", frameon=False)
+    return _mpl_truth(fig, ax, series, dpi=dpi)

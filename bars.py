@@ -95,6 +95,10 @@ def _find_panels(a, min_frac=0.06, tilt=False):
     else:
         hs = _segments(dark, minlen, th)
         vs = [(c, t, s, e) for c, t, s, e in _segments(dark.T, minlen, th)]
+
+    def unshadow(ls):  # 번진(바로 세운·흐린) 선의 가장자리 행이 짧게 따로 잡힌 것은 바로 옆의 긴 선에 맡김
+        return [l for l in ls if not any(o is not l and abs(o[0] - l[0]) <= 2.5 and abs(o[2] - l[2]) <= 3 and o[3] - o[2] > l[3] - l[2] + 3 for o in ls)]
+    hs, vs = unshadow(hs), unshadow(vs)
     cands = []
     for vx, vt, vs0, ve in vs:
         # 왼쪽 끝이 이 세로축에 닿는 가로선들 (아래 축, 위 테두리, 위아래로 붙은 그래프의 공유 축)

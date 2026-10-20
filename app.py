@@ -167,9 +167,11 @@ Return ONLY a JSON object:
  "x_label": "x-axis title with unit", "y_label": "y-axis title with unit", "title": "",
  "legend": [{"name": "series name exactly as printed", "color": "approximate hex RGB #rrggbb of the legend swatch", "style": "line|dashed|markers",
              "marker": "circle|square|triangle|diamond|none", "axis": "left" or "right" (which y-axis the series uses)}],
- "chart_type": "line" or "scatter" or "bar" (vertical bars) or "hbar" (horizontal bars) or "other"}
+ "chart_type": "line" or "scatter" or "bar" (vertical bars) or "hbar" (horizontal bars) or "pie" (pie or donut) or "polar" (polar, radar or rose)
+               or "3d" (3D axes, surface or 3D scatter) or "heatmap" (grid of colored cells or an image with a colorbar) or "contour" (contour lines or filled contours) or "other"}
 For bar charts the category axis has words, not numbers: give an empty list for that axis.
 Rules: copy tick numbers exactly as printed (10^3 or 1e3 -> 1000, 10^-2 -> 0.01, "−0.5" -> -0.5, "1,000" -> 1000).
+Drop units, currency and percent signs: "90 years" -> 90, "$5,000" -> 5000, "40%" -> 40 (not 0.4), "1.2k" -> 1200.
 Only numbers that are actually printed; do not invent or extrapolate. In-chart data labels are NOT axis ticks. A line+bar infographic without a printed numeric axis must have empty y_ticks and y2_ticks. Scale is "log" when labels grow by a constant
 factor (1, 10, 100 or 10^-1, 10^0, 10^1). Empty list if there is no legend."""
 
@@ -225,7 +227,34 @@ def num(v):
     s=re.sub(r'(년|명|회|건)$','',s)
     match=re.fullmatch(r'([\d.]+)만([\d.]*)',s)
     if match:return float(match[1])*10000+(float(match[2]) if match[2] else 0)
-    return float(s)
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    return _unit_num(s)
+
+
+_MULT = {"k": 1e3, "K": 1e3, "천": 1e3, "M": 1e6, "Mn": 1e6, "mn": 1e6, "B": 1e9, "bn": 1e9, "Bn": 1e9, "G": 1e9, "만": 1e4, "억": 1e8}
+
+
+def _unit_num(s):
+    """단위·통화·배수가 붙은 눈금 글자: '90years' '$5000' '40%' '1.2k' '25t' '€1.5M' '-$3' '1950s' → 숫자.
+    앞에는 부호·통화 기호만, 뒤에는 숫자 없는 단위(배수 k·M·B·만·억은 곱함)만 허용 — 'Q1' 같은 범주 글자는 숫자로 보지 않는다."""
+    m = re.fullmatch(r"([-+]?)((?:(?:US|A|C|HK|NZ)?\$|[€£¥₩₹])?)([-+]?)(\d+(?:\.\d+)?|\.\d+)([eE][-+]?\d+)?(.*)", s)
+    if not m or (m.group(1) and m.group(3)):
+        raise ValueError(f"숫자가 아님: {s!r}")
+    rest = m.group(6)
+    if re.search(r"\d", rest) or len(rest) > 12:
+        raise ValueError(f"숫자가 아님: {s!r}")
+    v = float(m.group(4) + (m.group(5) or ""))
+    if m.group(1) == "-" or m.group(3) == "-":
+        v = -v
+    unit = re.match(r"[A-Za-z가-힣]+", rest)
+    if unit and unit.group() in _MULT and (len(rest) == len(unit.group()) or not rest[len(unit.group())].isalpha()):
+        v *= _MULT[unit.group()]
+    elif rest and not re.fullmatch(r"[%‰°'\"]?\s*[A-Za-z가-힣µμΩ°%/²³·.\-]*\.?", rest):
+        raise ValueError(f"숫자가 아님: {s!r}")
+    return v
 
 
 def _crop_png(a, box, scale=1.0, maxw=1400):
@@ -275,7 +304,7 @@ def vlm_read(a, det=None, model=None):
 
 
 BLOB_PROMPT = """Each numbered row [1], [2], ... of this image shows ONE tick label cut from a chart axis.
-Read the number in each row exactly as printed (10^3 -> 1000, 10^-2 -> 0.01, "−0.5" -> -0.5). Korean 만 means 10000: 100만 -> 1000000, 32만 6800 -> 326800. Join wrapped lines of a single number. If a row is not a number, return null.
+Read the number in each row exactly as printed (10^3 -> 1000, 10^-2 -> 0.01, "−0.5" -> -0.5). Drop units, currency and percent signs: "90 years" -> 90, "$5,000" -> 5000, "40%" -> 40 (not 0.4), "1.2k" -> 1200, "1E-10" -> 1e-10. Korean 만 means 10000: 100만 -> 1000000, 32만 6800 -> 326800. Join wrapped lines of a single number. If a row is not a number, return null.
 Return ONLY JSON: {"labels": {"1": number or null, "2": number or null, ...}} with one entry per row; null if unreadable."""
 
 
@@ -615,17 +644,47 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
             "legend_src": src, "n_err": nerr}
 
 
-def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", whole=False):
+def deskew_image(iid):
+    """기울어진 스캔이면 바로 세운 새 그림을 저장 → (새 id 정보, 내용이 기운 각도°) 또는 (None, 0)"""
+    import deskew as K
+    a = image(iid)
+    if image_meta(iid).get("deskew") is not None:  # 이미 바로 세운 그림
+        return None, 0.0
+    d, info = K.estimate(a)
+    if not d:
+        return None, 0.0
+    info2 = save_image(_png(Image.fromarray(K.rotate(a, d))))
+    with open(ws("images", info2["id"] + ".json"), "w", encoding="utf-8") as f:
+        json.dump({"deskew": round(-d, 2), "source": iid}, f)  # parent 는 안 씀 (좌표가 돌아가 원본 범례 찾기에 못 씀)
+    return info2, round(-d, 2)
+
+
+def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", whole=False, force=False, deskew=True):
     """AI 자동 보정: 축·눈금·글자 위치 검출(결정론) + VLM 눈금 값 → 짝짓기·최소제곱. 계열 색 후보·범례 이름 제안.
     VLM 은 (1) 전체 그림에서 눈금 값 목록, (2) 글자 덩어리를 하나씩 번호 붙인 그림에서 덩어리별 값(1:1)을 읽고,
     둘 중 위치와 더 잘 맞는(잔차 작은) 쪽을 쓴다.
     chart: auto | xy(선·점) | bar(막대). 막대그래프면 값축만 보정하고 막대·조각·오차를 픽셀로 잰다(bar_auto).
     그래프가 여럿인 그림(논문 쪽)은 need_panel=True 와 panels 를 돌려준다 — 하나를 골라 자른 뒤 다시 부른다.
-    늘 message(한국어: 무엇을 했고 다음에 무엇을 하면 되는지)를 채운다."""
+    늘 message(한국어: 무엇을 했고 다음에 무엇을 하면 되는지)를 채운다.
+    기울어진 스캔(0.2~5°)은 먼저 바로 세운 새 그림으로 바꿔 처리하고 deskew={"angle": 내용이 기운 각도(반시계 +), "image": 새 그림}을 준다
+    — 이후 좌표·자르기는 새 그림 기준.
+    3D·극좌표·파이·히트맵·등고선처럼 2D 직교좌표가 아닌 그림은 자동 추출을 멈추고 code="unsupported_chart", unsupported={kind, label, why}
+    를 돌려준다 (force=True 면 거절하지 않고 경고만)."""
+    res = {"detect": None, "vlm": None, "error": None, "mode": "xy", "bar": None, "panels": [], "need_panel": False, "message": "",
+           "code": None, "unsupported": None, "deskew": None}
+    if deskew:
+        try:
+            info2, ang = deskew_image(iid)
+        except Exception:
+            info2, ang = None, 0.0
+        if info2:
+            res["deskew"] = {"angle": ang, "image": info2, "from": iid}
+            iid = info2["id"]
     a = image(iid)
     H, W = a.shape[:2]
     meta = image_meta(iid)
-    res = {"detect": None, "vlm": None, "error": None, "mode": "xy", "bar": None, "panels": [], "need_panel": False, "message": ""}
+    sk = image_meta(iid).get("deskew")
+    sk_note = (f"기울어진 스캔({abs(sk):.1f}° {'반시계' if sk > 0 else '시계'} 방향)을 바로 세운 그림으로 처리했습니다. " if sk else "")
     panels = B.find_panels(a)
     res["panels"] = panels
     plots = [p for p in panels if p["kind"] == "plot"]
@@ -633,15 +692,41 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
     if not whole and len(plots) >= 2:
         res["need_panel"] = True
         skip = len(panels) - len(plots)
-        res["message"] = (f"이 그림에서 그래프 {len(plots)}개를 찾았습니다" + (f" (지도·사진 등 {skip}개는 뺌)" if skip else "") +
-                          " — 아래 목록에서 하나를 고르거나 ✂ 자르기로 영역을 끌어 고르세요.")
+        res["message"] = sk_note + (f"이 그림에서 그래프 {len(plots)}개를 찾았습니다" + (f" (지도·사진 등 {skip}개는 뺌)" if skip else "") +
+                                    " — 아래 목록에서 하나를 고르거나 ✂ 자르기로 영역을 끌어 고르세요.")
         res["detect"] = {"ok": False, "error": res["message"]}
         return res
     hint = dict(zip(("x0", "y0", "x1", "y1"), meta["plot"])) if meta.get("plot") else dict(zip(("x0", "y0", "x1", "y1"), plots[0]["box"])) if len(plots)==1 else None
     det = D.auto_calibrate(a, None, None, box_hint=hint)
     res["detect"] = det
+    import chartkind as C
+    try:
+        sig = C.signals(a, det)
+    except Exception:
+        sig = {}
+
+    def reject(u, v=None):
+        res["unsupported"] = u
+        res["code"] = C.CODE
+        res["message"] = sk_note + C.message(u)
+        res["vlm"] = v
+        det["error"] = res["message"]
+        det["unsupported"] = u
+        for k in ("calib", "fit", "series"):
+            det.pop(k, None)
+        return res
     if not det.get("ok"):
-        res["message"] = "축선을 찾지 못했습니다 — ✂ 자르기로 그래프 영역만 고르거나, 수동 보정(축 위 두 점씩)을 쓰세요."
+        if not force:
+            v0 = None
+            if use_vlm:
+                try:
+                    v0 = vlm_read(a, None, model)
+                except Exception:
+                    v0 = None
+            u = C.judge(a, det, (v0 or {}).get("chart_type"), False, sig)
+            if u:
+                return reject(u, v0)
+        res["message"] = sk_note + "축선을 찾지 못했습니다 — ✂ 자르기로 그래프 영역만 고르거나, 수동 보정(축 위 두 점씩)을 쓰세요."
         det["error"] = res["message"]
         return res
     nb = len(B.find_bars(a, det["axes"])[1])
@@ -680,6 +765,19 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
                         v[k + "_ticks_each"] = per
         except Exception as e:
             res["error"] = f"VLM 읽기 실패 — 눈금 값을 직접 넣어 주세요 ({e})"
+    doubt = None
+    if not force and chart == "auto":
+        vt0 = (v or {}).get("chart_type")
+        strong = None
+        if C.vlm_kind(vt0):  # VLM 은 지원 안 하는 종류라 함 → 축·눈금 글자로 두 축이 보정되는지 직접 확인
+            xv0, yv0 = xvals or (v or {}).get("x_ticks") or [], yvals or (v or {}).get("y_ticks") or []
+            trial = D.auto_calibrate(a, xv0, yv0, None, None, each, {"x": xlog, "y": ylog}, box_hint=hint) if (xv0 or each.get("x")) and (yv0 or each.get("y")) else {}
+            fx = (trial.get("fit") or {})
+            strong = bool(trial.get("calib")) and all(fx[k]["resid_px"] < 1.5 and fx[k]["n"] >= 3 for k in ("x", "y"))
+        u = C.judge(a, det, vt0, bool(strong), sig)
+        if u:
+            return reject(u, v)
+        doubt = C.doubt(vt0)
     if v and chart=='auto':
         import annotations
         try:
@@ -757,6 +855,11 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
         if got:
             res["message"] = (res["message"].replace("데이터 탭에서 추출하세요", "결과 탭의 표를 확인하세요").replace("확인하고 결과", "확인하고, 결과") +
                               f" 계열 {len(got)}개를 자동으로 뽑았습니다 (" + ", ".join(f"{s['name']} {len(s['px'])}점" for s in got) + ").")
+    if doubt:
+        det.setdefault("warn", []).insert(0, doubt)
+    if sk:
+        det.setdefault("warn", []).insert(0, f"기울어진 스캔({sk:+.2f}°)을 바로 세웠습니다 — 화면의 그림은 바로 세운 그림입니다")
+        res["message"] = sk_note + res["message"]
     res["detect"] = det
     return res
 
@@ -825,6 +928,8 @@ def extract_all(a, det, chart_type=""):
     """보정이 끝나면 제안 계열(범례 이름+색, 범례가 없으면 그림에서 찾은 색)을 모두 자동 추출 — 따로 ▶ 추출을 누르지 않아도 표가 찬다.
     범례가 없을 때 찾은 색 가운데 선·표식이 아닌 것(글자·격자 조각)은 버린다."""
     calib, box = det["calib"], det["box"]
+    if (det.get("axes") or {}).get("roi_y0") is not None:  # 축선 없는 웹 차트: 맨 위 격자선 위로 넘친 데이터까지 추출
+        box = dict(box, y0=min(box["y0"], det["axes"]["roi_y0"]))
     legends = det.get("legend_boxes")
     out = []
     named = any(s.get("name") and not s["name"].startswith("계열 ") for s in det.get("series") or [])
@@ -840,6 +945,18 @@ def extract_all(a, det, chart_type=""):
         if len(grp) < 2:
             continue
         done.update(grp)
+        # 선만 있는 계열(표식 없음) + 표식 계열이 같은 색: 표식은 열림으로 떼어 내고 나머지 픽셀을 곡선으로
+        plain = [j for j in grp if str(sers[j].get("style") or "").lower() in ("line", "dashed") and str(sers[j].get("marker") or "none").lower() in ("", "none")]
+        mkd = [j for j in grp if j not in plain]
+        if len(plain) == 1 and len(mkd) == 1:
+            sp = D.split_line_markers(a, calib, box, s["color"], legends=legends)
+            if sp and len(sp["markers"]) >= 3 and len(sp["line"]) >= 10:
+                nm = [sers[j]["name"] for j in grp]
+                sers[mkd[0]] = dict(sers[mkd[0]], px=sp["markers"], mode="points", how="all", kind="points", split=True,
+                                    warn=[f"같은 색의 선 계열과 표식 계열({', '.join(nm)})을 갈랐습니다 — 이 계열: 표식 {len(sp['markers'])}개"])
+                sers[plain[0]] = dict(sers[plain[0]], px=sp["line"], mode="line", how="n", kind="line", split=True,
+                                      warn=[f"같은 색의 선 계열과 표식 계열({', '.join(nm)})을 갈랐습니다 — 이 계열: 표식을 지운 곡선"])
+                continue
         mg = D.marker_groups(a, calib, box, s["color"], len(grp), legends=legends)
         names = [sers[j]["name"] for j in grp]
         if not mg:
@@ -880,7 +997,11 @@ def extract_all(a, det, chart_type=""):
             out.append(s)
             continue
         hint = "markers" if chart_type == "scatter" else ("markers" if "marker" in (s.get("style") or "") and chart_type != "line" else None)
-        r = D.auto_series(a, calib, box, s["color"], legends=legends, hint=hint)
+        # 색이 가까운 다른 계열이 있으면 허용오차를 줄여 두 선이 한 마스크에 섞이지 않게 (OWID 갈색·주황 등)
+        others = [np.array(D.hex2rgb(t["color"]), float) for t in sers if t is not s and t.get("color") and not t.get("split")]
+        dmin = min([float(np.sqrt(((rgb(s["color"]) - o) ** 2).sum())) for o in others] or [999.0])
+        tol = float(min(60.0, max(25.0, 0.45 * dmin)))
+        r = D.auto_series(a, calib, box, s["color"], legends=legends, hint=hint, tol=tol)
         px = r["px"]
         if not named:  # 범례 없음: 선이 그림 폭의 30% 넘게 지나거나 표식이 3개 이상일 때만 계열로
             xs = [p[0] for p in px]
@@ -1171,7 +1292,8 @@ class H(BaseHTTPRequestHandler):
             if self.path == "/api/auto":
                 return self._send(auto(req.get("id"), req.get("vlm", True), req.get("model"),
                                        [num(v) for v in req.get("xvals") or []], [num(v) for v in req.get("yvals") or []],
-                                       req.get("chart") or "auto", bool(req.get("whole"))))
+                                       req.get("chart") or "auto", bool(req.get("whole")), bool(req.get("force")),
+                                       req.get("deskew", True) is not False))
             if self.path == "/api/crop":
                 return self._send(crop_image(req.get("id"), req.get("box") or [], req.get("plot")))
             if self.path == "/api/panels":

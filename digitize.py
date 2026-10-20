@@ -1,7 +1,7 @@
 """그래프 디지타이저 엔진 — 좌표는 전부 픽셀 처리 + 축 보정으로 결정론적으로 계산한다 (numpy + Pillow).
 
 보정(calib): {"x": {"p1": [px, py], "p2": [px, py], "v1": 값, "v2": 값, "log": bool}, "y": {...}}
-  x 값은 X1→X2 방향으로의 사영, y 값은 Y1→Y2 방향으로의 사영 (축이 서로 수직이면 조금 기운 스캔도 맞음).
+  x 값은 X1→X2 방향으로의 사영, y 값은 Y1→Y2 방향으로의 사영 (0.2° 안팎의 남은 기울기는 그대로 맞음 — 더 기운 스캔은 deskew.py 가 먼저 바로 세움).
   로그축은 log10 공간에서 선형.
 """
 import io
@@ -143,11 +143,24 @@ def detect_axes(a, hint=None):
         x0,x1=float(hint['x0']),float(hint['x1'])
         y0,y1=float(hint['y0']),float(hint['y1'])
         if 0<=x0<x1<W and 0<=y0<y1<H:
+            import frame
+            fr = frame.find(a)  # 회색 바탕·격자선 끝으로 잰 상자가 힌트(격자선 묶음)를 감싸면 그쪽이 실제 그림 영역
+            if fr:
+                fb = fr["box"]
+                ix = max(0, min(fb["x1"], x1) - max(fb["x0"], x0)) * max(0, min(fb["y1"], y1) - max(fb["y0"], y0))
+                if (ix / ((fb["x1"] - fb["x0"]) * (fb["y1"] - fb["y0"]) + (x1 - x0) * (y1 - y0) - ix) > 0.5
+                        and fb["x0"] <= x0 + 3 and fb["y0"] <= y0 + 3 and fb["x1"] >= x1 - 3 and fb["y1"] >= y1 - 3):
+                    return fr
             # Axisless grids/panels still have a measurable plotting rectangle.
             return {'xaxis':{'y':y1,'r0':int(y1),'r1':int(y1),'c0':int(x0),'c1':int(x1)},
                     'yaxis':{'x':x0,'c0':int(x0),'c1':int(x0),'r0':int(y0),'r1':int(y1)},
                     'box':dict(hint),'frame':False,'synth_y':True}
     synth_y = False
+    if not hs and not vs:  # 진한 축선이 하나도 없음: 회색 바탕(ggplot·seaborn)·격자선만 있는 웹 차트(OWID) → 바탕 사각형·격자선 끝
+        import frame
+        fr = frame.find(a)
+        if fr:
+            return fr
     if not hs or not vs:  # 축선이 없는 그래프(엑셀형: 세로축선 없음·연한 격자만) → 연한 선까지
         light = g < 235
         lhs = _line_groups(light, 0)
@@ -169,8 +182,23 @@ def detect_axes(a, hint=None):
     ya = min((v for v in vs if v[2] >= 0.6 * vmax), key=lambda v: v[0])   # 가장 왼쪽 긴 세로선
     top = [h for h in hs if h[2] >= 0.6 * hmax and h[0] < xa[0] - 0.2 * H]
     right = [v for v in vs if v[2] >= 0.6 * vmax and v[0] > ya[0] + 0.2 * W]
+    if len(right) >= 2:  # 오른쪽 세로선이 여럿: 컬러바 틀을 그림 영역 오른쪽 테두리로 잡지 않게
+        try:
+            import chartkind
+            cb = chartkind.colorbar(a)
+        except Exception:
+            cb = None
+        if cb and cb["y1"] - cb["y0"] > cb["x1"] - cb["x0"]:
+            inner = [v for v in right if v[0] < cb["x0"] - 2]
+            if inner and ya[0] + 0.5 * (max(v[0] for v in right) - ya[0]) < cb["x0"]:
+                right = inner
     box = {"x0": ya[0], "x1": max(right, key=lambda v: v[0])[0] if right else xa[4] + 0.5,
            "y0": min(top, key=lambda h: h[0])[0] if top else ya[3] + 0.5, "y1": xa[0]}
+    if box["y1"] - box["y0"] < 0.1 * H or box["x1"] - box["x0"] < 0.1 * W:  # 납작한 상자(바닥선만 찾음) → 격자선 끝으로 다시
+        import frame
+        fr = frame.find(a)
+        if fr:
+            return fr
     return {"xaxis": {"y": xa[0], "r0": xa[5], "r1": xa[6], "c0": xa[3], "c1": xa[4]},
             "yaxis": {"x": ya[0], "c0": ya[5], "c1": ya[6], "r0": ya[3], "r1": ya[4]},
             "box": box, "frame": bool(top and right), "synth_y": synth_y}
@@ -221,7 +249,6 @@ def detect_ticks(a, ax):
     if inner.size:
         frac = inner.mean(axis=0)
         gx = [(c0 + 3 + (s + e) / 2 + 0.5, 0) for s, e in runs(frac > 0.5) if e - s < wx]
-    xt, xk = pick(xo, xi, gx)
 
     left = dark[r0:r1 + 1, max(0, ya["c0"] - L): ya["c0"]][:, ::-1].T
     right = dark[r0:r1 + 1, ya["c1"] + 1: ya["c1"] + 1 + L].T
@@ -231,6 +258,15 @@ def detect_ticks(a, ax):
     if inner.size:
         frac = inner.mean(axis=1)
         gy = [(r0 + 3 + (s + e) / 2 + 0.5, 0) for s, e in runs(frac > 0.5) if e - s < wy]
+    if ax.get("axisless"):  # 축선 없는 그래프: 격자선은 frame 이 찾은 것 (바탕보다 밝은 선·점선 포함)
+        gr = ax.get("grid") or {}
+        gx = [(float(v), 0) for v in gr.get("x") or []]
+        gy = [(float(v), 0) for v in gr.get("y") or []]
+        if ax.get("frame_src") == "grid":  # 축선이 없으니 축선에 붙은 눈금도 없음 (옆 글자를 눈금으로 오인하지 않게)
+            yo, yi, xi = [], [], []
+            if len(gr.get("y") or []) >= 1:
+                gy = sorted(gy + [(float(ax.get("top_line", box["y0"])), 0)] + ([(float(box["y1"]), 0)] if ax.get("bottom_line") else []))
+    xt, xk = pick(xo, xi, gx)
     yt, yk = pick(yo, yi, gy)
     # 축 끝(모서리)에 붙은 가짜 눈금 제거: 다른 축선 위
     xt = [t for t in xt if abs(t[0] - ya["x"]) > 2 or xk == "out"]
@@ -249,6 +285,9 @@ def label_blobs(a, ax, ticks):
     """눈금 글자 덩어리의 중심 픽셀 — x: 축 아래 첫 글줄의 가로 덩어리, y: 축 왼쪽 첫 글기둥의 세로 덩어리."""
     H, W = a.shape[:2]
     dark = gray(a) < 160
+    if ax.get("axisless"):  # 축선 없는 그래프: 그림 가장자리에 걸친 색 있는 데이터 선·표식, 연한 눈금 표시는 글자가 아님
+        a16 = a.astype(np.int16)
+        dark = (gray(a) < 150) & ((a16.max(axis=2) - a16.min(axis=2)) < 60)
     xa, ya, box = ax["xaxis"], ax["yaxis"], ax["box"]
     out = {"x": [], "y": [], "x_boxes": [], "y_boxes": [], "x_band": None, "y_band": None}
     # x
@@ -258,6 +297,12 @@ def label_blobs(a, ax, ticks):
     c0, c1 = max(0, int(box["x0"]) - mx), min(W, int(box["x1"]) + mx)
     band = dark[top:min(H, top + int(0.3 * H)), c0:c1]
     rr = merge(runs(band.any(axis=1)), 2)
+    if rr and ax.get("axisless"):  # 축선 없는 그래프: 옆 y 글자 꼬리·눈금 표시 줄은 건너뛰고 가로로 늘어선 글줄
+        for s_, e_ in rr[:4]:
+            bl_ = merge(runs(band[s_:e_ + 1].any(axis=0)), max(3, int(0.45 * (e_ - s_ + 1))))
+            if len(bl_) >= 2 and bl_[-1][1] - bl_[0][0] >= 0.3 * (box["x1"] - box["x0"]) and e_ - s_ >= 3:
+                rr = [(s_, e_)]
+                break
     if rr:
         s, e = rr[0]
         h = e - s + 1
@@ -310,6 +355,16 @@ def _robust(pairs):
         trial = pairs[:j] + pairs[j + 1:]
         k2, b2, r2 = _fit(trial)
         if not (r2 < r * 0.7):
+            # 양 끝 글자를 안쪽으로 당겨 찍은 웹 차트(OWID 등): 첫·끝 짝이 같이 어긋나 하나씩 빼면 안 줄어듦 → 둘 같이
+            o = sorted(range(len(pairs)), key=lambda i: pairs[i][1])
+            ends = {o[0], o[-1]}
+            if len(pairs) >= 6 and len(dropped) + 2 <= len(pairs) // 3 + 1:
+                trial = [q for i, q in enumerate(pairs) if i not in ends]
+                k2, b2, r2 = _fit(trial)
+                if r2 < r * 0.4:
+                    dropped += [pairs[i] for i in sorted(ends)]
+                    pairs, k, b, r = trial, k2, b2, r2
+                    continue
             break
         dropped.append(pairs[j])
         pairs, k, b, r = trial, k2, b2, r2
@@ -358,8 +413,11 @@ def pair_axis(values, positions, ticks, majors=None, edges=(), log=None, reverse
     cands = []
     n, m = len(vals), len(pos)
     offs = [0] if fixed else range(-(n - 2), m - 1)
+    vv = [v for v in vals if v is not None]
     for lg in ([log] if log is not None else [False, True]):
-        if lg and min(v for v in vals if v is not None) <= 0:
+        if lg and min(vv) <= 0:
+            continue
+        if lg and log is None and hint is not True and max(vv) / min(vv) < 5:  # 한 자릿수도 안 되는 범위(연도 등)는 로그·선형을 가를 수 없음 → 선형
             continue
         fv = [None if v is None else (math.log10(v) if lg else v) for v in vals]
         for off in offs:
@@ -616,7 +674,7 @@ def extract_line(m, off):
         if not col.any():
             continue
         rs = runs(col)
-        cols.append((c, [((s + e) / 2, e - s + 1) for s, e in rs]))
+        cols.append((c, [((s + e) / 2, e - s + 1, s, e) for s, e in rs]))
     if not cols:
         return []
     # 시작점: 덩어리 하나뿐인 열이 이어지는 가장 긴 구간에서 출발해 양쪽으로 추적
@@ -632,8 +690,10 @@ def extract_line(m, off):
     seed = (best[0] + best[1]) // 2 if best[1] > best[0] else 0
     chosen = [None] * len(cols)
 
-    def track(idx_iter, prev):
+    def track(idx_iter, prev, prev_run=None):
         hist = [prev] if prev is not None else []
+        skipped = 0
+        last = prev_run  # 바로 앞에서 고른 덩어리 (열, 시작 행, 끝 행) — 이웃 열에서 맞닿으면 이어진 선(계단의 세로 부분 등)
         for i in idx_iter:
             c, rs = cols[i]
             if len(hist) >= 2:
@@ -646,16 +706,28 @@ def extract_line(m, off):
             if pred is None:
                 y = max(rs, key=lambda r: r[1])[0]
             else:
-                y = min(rs, key=lambda r: abs(r[0] - pred))[0]
+                run = min(rs, key=lambda r: abs(r[0] - pred))
+                y = run[0]
                 if hist and abs(c - hist[-1][0]) <= 3 and abs(y - hist[-1][1]) > max(0.25 * h, 40) and len(rs) == 1:
                     continue  # 갑작스러운 큰 점프(글자·범례 조각) — 건너뜀
+                # 끊긴 틈(다른 선에 가림·파선) 뒤 예측에서 멀리 떨어진 조각(다른 선의 번짐·글자)으로 넘어가지 않게: 몇 열은 건너뛰고 기다림.
+                # 바로 옆 열의 덩어리와 맞닿아 있으면(계단의 세로 부분처럼 이어진 선) 그대로 따라감. 8열 넘게 그 높이가 이어져도 따라감.
+                touch = last is not None and abs(c - last[0]) <= 1 and run[2] <= last[2] + 1 and run[3] >= last[1] - 1
+                if hist and not touch and abs(y - pred) > max(0.06 * h, 10) + abs(c - hist[-1][0]) and skipped < 8:
+                    skipped += 1
+                    continue
+            if pred is None:
+                run = max(rs, key=lambda r: r[1])
+            skipped = 0
+            last = (c, run[2], run[3])
             chosen[i] = y
             hist.append((c, y))
             hist = hist[-3:]
     rs0 = cols[seed][1]
-    chosen[seed] = max(rs0, key=lambda r: r[1])[0]
-    track(range(seed + 1, len(cols)), (cols[seed][0], chosen[seed]))
-    track(range(seed - 1, -1, -1), (cols[seed][0], chosen[seed]))
+    r0_ = max(rs0, key=lambda r: r[1])
+    chosen[seed] = r0_[0]
+    track(range(seed + 1, len(cols)), (cols[seed][0], chosen[seed]), (cols[seed][0], r0_[2], r0_[3]))
+    track(range(seed - 1, -1, -1), (cols[seed][0], chosen[seed]), (cols[seed][0], r0_[2], r0_[3]))
     seq = [(c, y) for (c, _), y in zip(cols, chosen) if y is not None]
     # 큰 점프로 갈린 짧은 조각(범례 견본선·글자)은 버린다
     jump = max(0.15 * h, 20)
@@ -678,7 +750,10 @@ def find_legend_boxes(a, box):
     x0, y0, x1, y1 = x0 + 2, y0 + 2, x1 - 2, y1 - 2
     if x1 - x0 < 40 or y1 - y0 < 40:
         return []
-    ink = gray(a[y0:y1, x0:x1]) < 235
+    sub = a[y0:y1, x0:x1]
+    bg = gray(np.median(sub.reshape(-1, 3), axis=0)[None, None, :])[0, 0]
+    # 바탕색(흰색·ggplot 회색) 과 다른 픽셀 — 회색 바탕 그림에서 바탕 전체를 잉크로 보면 선분이 수만 개가 됨
+    ink = np.abs(gray(sub) - bg) > 20 if bg < 245 else gray(sub) < 235
     h, w = ink.shape
     hseg = [(r, s, e) for r in range(h) for s, e in runs(ink[r]) if 25 <= e - s + 1 <= 0.85 * w]
     vseg = [(c, s, e) for c in range(w) for s, e in runs(ink[:, c]) if 12 <= e - s + 1 <= 0.85 * h]
@@ -1064,6 +1139,147 @@ def run_series(a, calib, box, s, excludes=(), legends=None):
     return {"px": px, "data": data, "warn": warn, "mask": m, "off": off}
 
 
+def _fatness(m, off, lpx):
+    """표식 판정용: 구멍 메운 마스크의 거리변환 → (선 반두께, 함수 f(점들) = 표식 중심이 선보다 뚜렷이 두꺼운 비율).
+    scipy 가 없으면 (None, None) — 예전 판정을 그대로 쓴다."""
+    try:
+        from scipy import ndimage
+    except ImportError:
+        return None, None
+    if not m.any():
+        return None, None
+    f = ndimage.binary_fill_holes(m)
+    dt = ndimage.distance_transform_edt(f)
+    h, w = m.shape
+    vals = []
+    for x, y in lpx or []:
+        i, j = int(y - off[1]), int(x - off[0])
+        if 0 <= i < h and 0 <= j < w and m[i, j]:
+            vals.append(dt[max(0, i - 1):i + 2, max(0, j - 1):j + 2].max())
+    half = float(np.median(vals)) if vals else 1.0
+    if len(vals) < 0.5 * len(lpx or [1]) or half > 3:  # 띄엄띄엄 표식뿐(산점)이면 선 두께를 잴 수 없음 → 가는 선으로 봄
+        half = 1.0
+    thr = max(2.0, 1.6 * half + 0.5)
+
+    def frac(pts):
+        if not pts:
+            return 0.0
+        k = 0
+        for x, y in pts:
+            i, j = int(round(y - off[1] - 0.5)), int(round(x - off[0] - 0.5))
+            if 0 <= i < h and 0 <= j < w and dt[max(0, i - 2):i + 3, max(0, j - 2):j + 3].max() >= thr:
+                k += 1
+        return k / len(pts)
+    return half, frac
+
+
+def _dashed(lpx, span):
+    """선 추적 점의 열 틈이 잘고 고르게 퍼져 있으면(점선·파선) True — 큰 구멍(띄엄띄엄 표식)이 아님"""
+    if len(lpx) < 10 or not span:
+        return False
+    xs = np.unique(np.round([p[0] for p in lpx]).astype(int))
+    gaps = np.diff(xs) - 1
+    gaps = gaps[gaps > 0]
+    if len(gaps) < 4:
+        return False
+    if not (np.percentile(gaps, 90) <= max(6, 0.03 * span) and (xs[-1] - xs[0]) >= 0.5 * span):
+        return False
+    # 한 줄로 매끄럽게 이어져야 함: 이웃 열 사이 높이 차가 작음 (흩어진 산점은 표식마다 크게 뜀)
+    P = np.asarray(sorted(lpx), float)
+    dx = np.maximum(np.diff(P[:, 0]), 1.0)
+    dy = np.abs(np.diff(P[:, 1]))
+    return bool(np.mean(dy <= 3 + 2.5 * dx) >= 0.9)
+
+
+def open_markers(a, box, color, legends=None, tol=60):
+    """표식만 남기기: 구멍 메움(속 빈 표식 → 원판) → 열림(침식→팽창)으로 가는 선(같은 색 곡선·오차막대 줄기·캡)을 지운 뒤 덩어리 중심.
+    글자·범례 견본은 extract_points 와 같은 규칙으로 뺀다. → (표식 중심 [[x, y]...], 표식 마스크, 원 마스크, off) — scipy 없으면 None"""
+    try:
+        from scipy import ndimage
+    except ImportError:
+        return None
+    col = hex2rgb(color) if isinstance(color, str) else color
+    neutral = max(col) - min(col) < 40 and max(col) < 120
+    m, off = mask_for(a, col, 300 if neutral else tol + 30, box, legends or [])
+    x0, y0 = off
+    sub = a[y0:y0 + m.shape[0], x0:x0 + m.shape[1]]
+    if neutral:  # 검정 계열: 무채색 어두운 픽셀만
+        s16 = sub.astype(np.int16)
+        m &= ((s16.max(axis=2) - s16.min(axis=2)) < 60) & (gray(s16) < 190)
+    if not m.any():
+        return None
+    f = ndimage.binary_fill_holes(m)
+    comps, op = [], f
+    for r in range(1, 6):
+        op = ndimage.binary_opening(f, structure=np.ones((2 * r + 1, 2 * r + 1), bool))
+        comps = [c for c in _components(op) if c[0] >= 4]
+        if comps and not any(_linelike(c) and c[0] > 12 for c in comps):
+            break
+    comps = [c for c in comps if not _linelike(c)]
+    if len(comps) < 3:
+        return None
+    med = float(np.median([c[0] for c in comps]))
+    comps = [c for c in comps if 0.3 * med <= c[0] <= 2.5 * med]
+    size = float(np.median([max(c[3], c[4]) for c in comps]))
+    if size < 4:  # 너무 작으면 선 조각
+        return None
+    rg = sub.astype(np.int16)
+    dark = ((gray(sub) < 160) & ((rg.max(axis=2) - rg.min(axis=2)) < 80)) & ~ndimage.binary_dilation(op, iterations=2)
+    _clear_edge_ticks(dark)
+    inkm = (gray(sub) < 200) | ((rg.max(axis=2) - rg.min(axis=2)) > 60)
+    # 글자 이웃 규칙: 같은 색 픽셀 중 긴 선(곡선·오차막대 줄기)은 빼고 — 선에 붙은 표식이 글자로 몰리지 않게, 낱말 속 'o' 같은 글자는 빠지게
+    rest = m & ~ndimage.binary_dilation(op, iterations=3)
+    lab, nl = ndimage.label(rest, structure=np.ones((3, 3)))
+    same = m.copy()
+    for j, sl in enumerate(ndimage.find_objects(lab)):
+        if sl is not None and max(sl[0].stop - sl[0].start, sl[1].stop - sl[1].start) > 3 * size:
+            same[sl] &= lab[sl] != j + 1
+    drop = _text_filter(comps, dark, size, inkm, same)
+    comps = [c for i, c in enumerate(comps) if i not in drop]
+    pts = sorted([[x0 + c[1] + 0.5, y0 + c[2] + 0.5] for c in comps])
+    return pts, op, m, off
+
+
+def split_line_markers(a, calib, box, color, legends=None, tol=60, n=50):
+    """같은 색의 선 계열과 표식 계열(흑백 논문 그림: 모형 곡선 + 실험 점)을 가른다 → {"markers": 점, "line": 곡선 픽셀 점} 또는 None"""
+    om = open_markers(a, box, color, legends, tol)
+    if not om:
+        return None
+    pts, op, m, off = om
+    try:
+        from scipy import ndimage
+        rest = m & ~ndimage.binary_dilation(op, iterations=3)
+    except ImportError:
+        return None
+    # 테두리 없는 범례의 선 견본: 가로로 곧고 짧은 조각인데 오른쪽(조금 띄고)에 글자가 붙음 → 곡선에서 빼고,
+    # 그 옆·아래(범례 자리)의 표식 견본·글자 조각도 표식에서 뺀다
+    g_ = gray(a)
+    a16 = a.astype(np.int16)
+    txt = (g_ < 160) & ((a16.max(axis=2) - a16.min(axis=2)) < 80)
+    W_ = box["x1"] - box["x0"]
+    lab, nl = ndimage.label(rest, structure=np.ones((3, 3)))
+    sz = float(np.median([abs(b_[0] - a_[0]) for a_, b_ in zip(pts[:-1], pts[1:])] or [10])) if len(pts) > 1 else 10.0
+    for j_, sl in enumerate(ndimage.find_objects(lab)):
+        if sl is None:
+            continue
+        hh, ww = sl[0].stop - sl[0].start, sl[1].stop - sl[1].start
+        if not (hh <= 4 and 12 <= ww < 0.2 * W_):
+            continue
+        ye, xs_, xe = off[1] + (sl[0].start + sl[0].stop) / 2, off[0] + sl[1].start, off[0] + sl[1].stop
+        right = txt[int(ye) - 6:int(ye) + 7, int(xe) + 6:int(xe) + 80]
+        if right.size and right.any(axis=0).sum() >= 8:
+            rest[sl] &= lab[sl] != j_ + 1
+            pts = [p_ for p_ in pts if not (xs_ - 10 <= p_[0] <= xe + 0.3 * W_ and ye - 12 <= p_[1] <= ye + 4 * max(12.0, min(sz, 40.0)))]
+    lpx = extract_line(rest, off)
+    line = []
+    if len(lpx) >= 10:
+        d = resample(calib, lpx, "n", n)
+        if d:
+            X, Y = to_pixel(calib, [q[0] for q in d], [q[1] for q in d])
+            line = [[float(x), float(y)] for x, y in zip(X, Y)]
+    return {"markers": pts, "line": line}
+
+
 def auto_series(a, calib, box, color, legends=None, tol=60, n=50, hint=None):
     """추출 방식 자동 선택 — 화면에서 ▶ 추출을 따로 누르지 않아도 되게.
     선(열마다 이어짐) / 점(띄엄띄엄 표식) / 선+표식(표식 = 실제 데이터 점 → 표식 중심을 씀) 을 마스크 모양으로 가른다.
@@ -1078,6 +1294,7 @@ def auto_series(a, calib, box, color, legends=None, tol=60, n=50, hint=None):
     span = (max(p[0] for p in lpx) - min(p[0] for p in lpx) + 1) if lpx else 0
     dens = len(lpx) / span if span else 0  # 선이 지나는 열 비율 (점선이면 낮음, 산점이면 아주 낮음)
     m = ln["mask"]
+    half, fat = _fatness(m, ln["off"], lpx)  # 표식은 선보다 두꺼워야 함 (선의 계단·파선 조각·오차막대 캡은 표식이 아님)
     if dens>.7 and len(mk)>=5:
         # Tiny raster steps on a thin line must not become extra observations.
         cs=[c for c in _components(_shift_and(m,1,"and")) if c[0]>=2]
@@ -1088,8 +1305,10 @@ def auto_series(a, calib, box, color, legends=None, tol=60, n=50, hint=None):
             clean=sorted([[off[0]+c[1]+.5,off[1]+c[2]+.5] for c in cs])
             if len(clean)>=5 and clean[-1][0]-clean[0][0]>.95*span:
                 dx=np.diff([p[0] for p in clean])
-                if np.std(dx)/np.mean(dx)<.15:mk=clean
-    blob = len(mk) >= 2 and (dens < 0.35 or (hint == "markers" and dens < 0.6))
+                if np.std(dx)/np.mean(dx)<.15 and (fat is None or fat(clean)>=.6):mk=clean
+    real_mk = fat is None or hint == "markers" or (len(mk) >= 2 and fat(mk) >= 0.5)  # 산점도(AI 판정)면 예전처럼 표식으로
+    dashed = not real_mk and len(mk) >= 6 and 0.15 <= dens < 0.9 and _dashed(lpx, span)
+    blob = len(mk) >= 2 and not dashed and (dens < 0.35 or (hint == "markers" and dens < 0.6))
     if blob:
         out = {"mode": "points", "how": "all", "px": mk, "data": pt["data"], "warn": pt["warn"], "kind": "points"}
     else:
@@ -1100,7 +1319,8 @@ def auto_series(a, calib, box, color, legends=None, tol=60, n=50, hint=None):
                 j = int(np.argmin(np.abs(P[:, 0] - x)))
                 if abs(P[j, 0] - x) <= 3 and abs(P[j, 1] - y) <= 6:
                     on += 1
-        if len(mk) >= 3 and on >= 0.7 * len(mk):  # 선 위에 표식 → 표식이 데이터 점
+        mspan = (max(p[0] for p in mk) - min(p[0] for p in mk)) if len(mk) >= 2 else 0
+        if len(mk) >= 3 and on >= 0.7 * len(mk) and real_mk and (fat is None or mspan >= 0.5 * span):  # 선 위에 (선보다 굵은) 표식 → 표식이 데이터 점
             mk = sorted(mk)
             P = np.asarray(lpx)
             dx = float(np.median(np.diff([p[0] for p in mk])))
@@ -1131,8 +1351,17 @@ def auto_series(a, calib, box, color, legends=None, tol=60, n=50, hint=None):
             else:
                 px = []
             out = {"mode": "line", "how": "n", "px": px, "data": d, "warn": ln["warn"], "kind": "line"}
-            if dens < 0.85 and span > 0.2 * (box["x1"] - box["x0"]):
+            if dashed:
+                warn.append("점선·파선으로 보고 조각 사이를 이어 곡선으로 뽑았습니다")
+            elif dens < 0.85 and span > 0.2 * (box["x1"] - box["x0"]):
                 warn.append("점선·끊긴 선으로 보입니다 — 빈 곳은 보간했습니다")
+    if hint == "markers" and out["kind"] == "line":  # AI 는 표식이라는데 선으로 뽑힘: 같은 색 오차막대(줄기·캡)·선에 붙은 표식 → 열림으로 표식만
+        om = open_markers(a, box, color, legends, tol)
+        if om and len(om[0]) >= 3 and (max(p[0] for p in om[0]) - min(p[0] for p in om[0])) >= 0.5 * span:
+            P = om[0]
+            X, Y = to_data(calib, [p[0] for p in P], [p[1] for p in P])
+            out = {"mode": "points", "how": "all", "px": P, "data": [[float(x), float(y)] for x, y in zip(X, Y)],
+                   "warn": ["같은 색 오차막대·선과 붙은 표식 — 가는 선(줄기·캡)을 지우고 표식 중심만 뽑았습니다"], "kind": "points"}
     if m.size and m.mean() > 0.25:
         warn.append("이 색이 그림의 넓은 면적을 차지합니다 — 배경·채움 색일 수 있습니다")
     out["warn"] = out["warn"] + warn
