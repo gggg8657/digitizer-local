@@ -352,7 +352,7 @@ async function autoCal(useVlm = true, xvals = null, yvals = null, force = false)
     S.box = d.box;
     const parts = [];
     const isBar = r.mode === 'bar' && r.bar?.ok;
-    if (useVlm || xvals || yvals || isBar) S.bar = isBar ? { orient: r.bar.orient, bars: r.bar.bars, series: r.bar.series, legend_src: r.bar.legend_src } : null;
+    if (useVlm || xvals || yvals || isBar) S.bar = isBar ? { orient: r.bar.orient, bars: r.bar.bars, series: r.bar.series, legend_src: r.bar.legend_src, calib2: r.bar.calib2 || null, lines: r.bar.lines || [] } : null;
     if (d.calib) {
       for (const k of ['x', 'y']) { const c = d.calib[k]; S.calib[k] = { p1: c.p1, p2: c.p2, v1: fmt(c.v1), v2: fmt(c.v2), log: c.log, cat: !!c.cat }; }
       if (r.message) parts.push(`<div class="ok">✓ ${esc(r.message)}</div>`);
@@ -397,9 +397,10 @@ async function choosePanel(p) {
 }
 
 // ── 막대 ────────────────────────────────────────────────────────────
-function barVal(b, p) { return S.bar.orient === 'h' ? toData(p, b.c)[0] : toData(b.c, p)[1]; }
+function barVal(b, p) { const C = b.axis === 'right' && S.bar.calib2 ? S.bar.calib2 : S.calib;  // 이중축: 오른쪽 값축 막대
+  return S.bar.orient === 'h' ? toData(p, b.c, C)[0] : toData(b.c, p, C)[1]; }
 function barRows() {
-  const B = S.bar, used = [...new Set(B.bars.flatMap(b => b.series))].sort((a, b) => a - b), nm = j => B.series[j]?.name || `계열 ${j + 1}`;
+  const B = S.bar, used = [...new Set(B.bars.flatMap(b => b.series))].sort((a, b) => a - b), nm = j => (B.series[j]?.name || `계열 ${j + 1}`) + (B.calib2 && B.series[j]?.axis === 'right' ? ' (오른쪽 축)' : '');
   const stacked = B.bars.some(b => b.ends.length > 1), errS = [...new Set(B.bars.filter(b => b.err).map(b => b.series[b.series.length - 1]))].sort((a, b) => a - b);
   const rows = [], idx = {};
   for (const b of B.bars) {  // 범주 열쇠 = 그룹 + 이름 (번호 붙이기 전). 같은 계열이 이미 있으면 새 줄
@@ -553,7 +554,8 @@ function syncTable() {
   document.querySelector('[data-tab=tOut]').classList.add('done');
 }
 function exportBody(format) {
-  if (S.bar) return { calib: calJSON(), format, series: S.bar.series.map(s => ({ name: s.name })), bars: S.bar.bars, orient: S.bar.orient, table: barRows(),
+  if (S.bar) return { calib: calJSON(), format, series: S.bar.series.map(s => ({ name: s.name, ...(s.axis ? { axis: s.axis } : {}) })), bars: S.bar.bars, orient: S.bar.orient, table: barRows(),
+    ...(S.bar.calib2 ? { calib2: S.bar.calib2 } : {}), ...(S.bar.lines?.length ? { lines: S.bar.lines } : {}),
     meta: { name: $('pName').value || S.name || 'digitized', image: S.img?.id, mode: '막대' } };
   return { calib: calJSON(), format, series: S.series.map(s => ({ name: s.name, px: s.px, manual: true, ...(s.calib ? { calib: { x: calJSON().x, y: s.calib.y } } : {}) })), meta: { name: $('pName').value || S.name || 'digitized', image: S.img?.id, xlabel: S.det?.vlm?.x_label || '', ylabel: S.det?.vlm?.y_label || '' } }; }
 async function download(format) {

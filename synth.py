@@ -780,3 +780,98 @@ def relative_bars(size=(680, 450)):
     b = io.BytesIO()
     im.save(b, "PNG")
     return b.getvalue(), {"vals": vals, "bars": bars, "colors": ["#fb1da7", "#fcd318", "#6b1dac"], "names": ["팝", "재즈", "록"]}
+
+
+# ── 2026-10-20 이중축 막대 + 선 시험용 ───────────────────────────────────────
+def combo_case(kind, dpi=100):
+    """참값을 아는 막대 콤보 그림 (matplotlib). kind:
+    bar_line_twin — 막대(왼쪽 축) + 선 계열(오른쪽 축, 막대 위를 지남), 오른쪽 눈금 글자는 선 색, 범례 하나
+    bars_both     — 맞붙은 좁은 두 색 막대: 한 계열은 왼쪽 선형축, 다른 계열은 오른쪽 로그축(막대가 축 아래 끝에서 섬), 축 글자 색 = 계열 색
+    dashed_across — 한 축 묶음 막대 + 막대를 가로지르는 검은 추세 파선(범례 항목)
+    → (PNG, truth) truth = {ticks, ticks2, lim, lim2, log2, bars: [{c_px, top, series, axis}], names, colors, axes, lines: [{name, axis, px, val}]}"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    fig, ax = plt.subplots(figsize=(7.2, 4.6), dpi=dpi)
+    ax2, lines, handles = None, [], []
+    if kind == "bar_line_twin":
+        x = np.arange(8)
+        v = [12, 18, 25, 22, 35, 41, 38, 52]
+        w = [220, 340, 310, 560, 610, 790, 880, 1050]
+        handles.append(ax.bar(x, v, 0.6, color="#4c72b0", label="Sales", zorder=2))
+        ax.set_ylim(0, 60)
+        ax.set_xticks(x, ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug"])
+        ax2 = ax.twinx()
+        handles += ax2.plot(x, w, color="#dd5511", lw=2.2, label="Visitors", zorder=5)
+        ax2.set_ylim(0, 1200)
+        ax2.tick_params(axis="y", colors="#dd5511")
+        ax2.set_ylabel("Visitors", color="#dd5511")
+        ax.set_ylabel("Sales")
+        series = [("Sales", "#4c72b0", "left", v, x, 0.0)]
+        lines = [("Visitors", "right", x, w)]
+        names, colors, axes = ["Sales", "Visitors"], ["#4c72b0", "#dd5511"], ["left", "right"]
+    elif kind == "bars_both":
+        x = np.arange(10)
+        a = [2, 3, 1, 4, 6, 5, 9, 12, 15, 21]
+        b = [3, 40, 12, 300, 900, 150, 2500, 6000, 4000, 30000]
+        bw = 0.3
+        handles.append(ax.bar(x - bw / 2, a, bw, color="#8b008b", label="Blocks"))
+        ax.set_ylim(0, 25)
+        ax.tick_params(axis="y", colors="#8b008b")
+        ax.set_ylabel("Blocks", color="#8b008b")
+        ax2 = ax.twinx()
+        ax2.set_yscale("log")
+        handles.append(ax2.bar(x + bw / 2, b, bw, color="#008080", label="Edits"))
+        ax2.set_ylim(0.6, 50000)
+        ax2.tick_params(axis="y", colors="#008080")
+        ax2.set_ylabel("Edits (log)", color="#008080")
+        ax.set_xticks(x, [f"M{i + 1}" for i in x])
+        series = [("Blocks", "#8b008b", "left", a, x - bw / 2, 0.0), ("Edits", "#008080", "right", b, x + bw / 2, 0.0)]
+        names, colors, axes = ["Blocks", "Edits"], ["#8b008b", "#008080"], ["left", "right"]
+    elif kind == "dashed_across":
+        x = np.arange(6)
+        a = [30, 45, 52, 61, 70, 84]
+        b = [20, 38, 41, 55, 66, 73]
+        bw = 0.38
+        handles.append(ax.bar(x - bw / 2, a, bw, color="#2a9d8f", label="North"))
+        handles.append(ax.bar(x + bw / 2, b, bw, color="#e9c46a", label="South"))
+        tr_ = 28 + 10.5 * x
+        handles += ax.plot(x, tr_, "k--", lw=2, label="Trend", zorder=5)
+        ax.set_ylim(0, 100)
+        ax.set_xticks(x, ["2019", "2020", "2021", "2022", "2023", "2024"])
+        series = [("North", "#2a9d8f", "left", a, x - bw / 2, 0.0), ("South", "#e9c46a", "left", b, x + bw / 2, 0.0)]
+        lines = [("Trend", "left", x, tr_)]
+        names, colors, axes = ["North", "South", "Trend"], ["#2a9d8f", "#e9c46a", "#000000"], ["left", "left", "left"]
+    else:
+        raise ValueError(kind)
+    ax.legend(handles=handles, loc="upper left", fontsize=9)
+    fig.tight_layout()
+    fig.canvas.draw()
+    H = fig.canvas.get_width_height()[1]
+
+    def px(axx, xv, yv):
+        p = axx.transData.transform(np.column_stack([xv, yv]))
+        return p[:, 0], H - p[:, 1]
+    bars = []
+    for nm, col, side, vals, xs, _ in series:
+        cx, _ = px(ax, xs, np.zeros(len(xs)))
+        for c_, t_ in zip(cx, vals):
+            bars.append({"c_px": float(c_), "top": float(t_), "series": nm, "axis": side})
+    bars.sort(key=lambda b_: b_["c_px"])
+    lt = []
+    for nm, side, xs, ys in lines:
+        axx = ax2 if side == "right" else ax
+        xx = np.linspace(xs[0], xs[-1], 200)
+        yy = np.interp(xx, xs, ys)
+        cx, _ = px(axx, xx, yy)
+        lt.append({"name": nm, "axis": side, "px": [float(q) for q in cx], "val": [float(q) for q in yy]})
+    lim = [float(q) for q in ax.get_ylim()]
+    tk = [float(t) for t in ax.get_yticks() if lim[0] - 1e-9 <= t <= lim[1] + 1e-9]
+    lim2 = [float(q) for q in ax2.get_ylim()] if ax2 else None
+    tk2 = [float(t) for t in ax2.get_yticks() if lim2[0] - 1e-9 <= t <= lim2[1] * (1 + 1e-9)] if ax2 else []
+    b_ = io.BytesIO()
+    fig.savefig(b_, format="png", dpi=dpi)
+    plt.close(fig)
+    return b_.getvalue(), {"ticks": tk, "ticks2": tk2, "lim": lim, "lim2": lim2, "log2": bool(ax2 and ax2.get_yscale() == "log"),
+                           "bars": bars, "names": names, "colors": colors, "axes": axes, "lines": lt}

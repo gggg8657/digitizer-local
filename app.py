@@ -561,6 +561,24 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
         ax = dict(ax, box=dict(bx, y0=y0n), yaxis=dict(ax["yaxis"], r0=int(y0n)))
         bx = ax["box"]
         an = B.analyze(a, ax, cv, orient, two_sided)
+    lines, line_warn = [], None
+    if orient == "v" and not relative and an["bars"] and len((v or {}).get("legend") or []) >= 2:
+        # 막대 + 선 콤보: 범례 항목이 막대 견본보다 많으면(선 항목이 있음) 막대 위를 지나는 선(추세선·선 계열)을 찾아 지운 그림에서 막대를 다시 잰다
+        try:
+            base0 = ax["xaxis"]["y"]
+            rects0 = [[b["l"], min(b["top_px"], base0), b["r"], base0] for b in an["bars"]]
+            if len(v["legend"]) > len(B.legend_patches(a, avoid=rects0)):
+                seeds = []
+                for it in v["legend"]:
+                    cw = D.color_word(it.get("color"))
+                    if cw and all(np.linalg.norm(np.subtract(D.hex2rgb(cw), D.hex2rgb(q["color"]))) > 40 for q in seeds):
+                        seeds.append({"color": cw})
+                lines = B.overlay_lines(a, ax, an["bars"], seeds, D.find_legend_boxes(a, bx))
+                if lines:
+                    a_bar = B.erase_lines(a, lines, ax["xaxis"]["r0"], an["bars"])
+                    an = B.analyze(a_bar, ax, cv, orient, two_sided)
+        except Exception as e:  # 선을 못 지워도 막대는 그대로 잰다
+            lines, line_warn = [], f"막대 위를 지나는 선을 지우지 못했습니다 ({e})"
     if not cv["log"] and cv["v2"] != cv["v1"]:  # 히스토그램 빈 칸(높이 0)은 값 0 의 픽셀에
         z = cv["p1"] + (0 - cv["v1"]) * (cv["p2"] - cv["p1"]) / (cv["v2"] - cv["v1"])
         for b in an["bars"]:
@@ -576,6 +594,8 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
         if len(measured)>=8 and len(layout.solid_palette(a,bx))>=2:
             an['bars']=measured;raster_solid=True
     warn = [lab_note] if lab_note else []
+    if line_warn:
+        warn.append(line_warn)
     if relative:
         warn.insert(0, "값축 숫자가 없어 상대값(" + ("가장 높은 격자선=100" if relative["ref"] == "grid" else "가장 높은 막대=100")
                     + ")으로 뽑았습니다 — 실제 값은 눈금 두 개를 직접 넣어 보정하세요")
@@ -724,6 +744,21 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
                         b["cat"] = t.replace("\n", " ").strip()
         except Exception as e:
             warn.append(f"비스듬한 범주 글자를 읽지 못했습니다 ({e})")
+    if len(out_series) >= 2:  # 맞붙은 다른 계열 막대(좁은 묶음): 범주 글자는 묶음에 하나 — 막대마다 따로 읽은 이름을 묶음에서 가장 많은 이름으로
+        grp = []
+        for b in sorted(bars, key=lambda q: q["c"]):
+            last = grp[-1] if grp else None
+            if (last and b["series"] and b["w"][0] - last[-1]["w"][1] <= 2 and not b.get("zero")
+                    and set(b["series"]).isdisjoint(j for q in last for j in q["series"])):
+                last.append(b)
+            else:
+                grp.append([b])
+        for g in grp:
+            nms = [q["cat"] for q in g if not q["cat"].startswith("막대 ")]
+            if len(g) > 1 and len(set(nms)) > 1:
+                top = max(nms, key=lambda n_: (nms.count(n_), -nms.index(n_)))
+                for q in g:
+                    q["cat"] = top
     groups_of = {}
     for b in bars:
         groups_of.setdefault(b["cat"], set()).add(b.get("group") or "")
@@ -736,10 +771,134 @@ def bar_auto(a, det, v=None, each=None, xvals=None, yvals=None, model=None, meta
     nerr = sum(1 for b in bars if b["err"])
     if relative:
         calib[name]["relative"] = True
+    # 이중축: 오른쪽 값축 눈금이 있으면 오른쪽 보정을 만들고, 계열마다 어느 축인지 정한다 (축 글자 색 → 범례(AI)의 축 → 왼쪽)
+    calib2 = None
+    if orient == "v" and v and len(v.get("y2_ticks") or []) >= 2 and not relative and not lab_note:
+        try:
+            calib2 = right_axis(a, {"axes": ax, "calib": calib}, v, model)
+        except Exception as e:
+            warn.append(f"오른쪽 값축 눈금을 맞추지 못했습니다 ({e}) — 모든 막대를 왼쪽 축으로 쟀습니다")
+    line_series = _combo_lines(lines, out_series, v, calib) if lines else []
+    if calib2:
+        sides = _axis_sides(a, ax, lb, [s_["color"] for s_ in out_series] + [s_["color"] for s_ in line_series],
+                            [s_["name"] for s_ in out_series] + [s_["name"] for s_ in line_series], v)
+        for s_, sd in zip(out_series + line_series, sides):
+            s_["axis"] = sd
+        right = {i for i, s_ in enumerate(out_series) if s_["axis"] == "right"}
+        if right and (len(right) < len(out_series) or any(s_["axis"] == "left" for s_ in line_series)):  # 왼쪽 축도 누가 써야 두 축
+            for b in bars:
+                if b["series"] and all(j in right for j in b["series"]):
+                    b["axis"] = "right"
+        else:  # 막대가 다 한 축이면 막대는 왼쪽 보정 (오른쪽 축은 선만 쓰거나, 옆 그래프의 눈금 글자)
+            for s_ in out_series:
+                s_["axis"] = "left"
+        for s_ in line_series:
+            if s_["axis"] == "right":
+                s_["calib"] = calib2
+        nr = [s_["name"] for s_ in out_series + line_series if s_["axis"] == "right"]
+        if nr:
+            c2 = calib2["y"]
+            warn.append(f"오른쪽 값축({'로그 ' if c2.get('log') else ''}{c2['v1']:g}…{c2['v2']:g})이 따로 있습니다 — "
+                        f"{', '.join(nr)} 은(는) 오른쪽 눈금으로 쟀습니다(축 글자 색·범례로 판단). 틀리면 표에서 확인하세요")
+        else:
+            calib2 = None
+    for s_ in out_series:
+        s_.setdefault("axis", "left")
+    if line_series:
+        warn.append(f"막대 위를 지나는 선 {len(line_series)}개(" + ", ".join(s_["name"] for s_ in line_series)
+                    + ")는 막대를 잴 때 지우고 따로 선 계열로 뽑았습니다 — 막대에 가린 구간은 값이 없습니다")
     out = {"ok": True, "orient": orient, "calib": calib, "fit": {name: fit}, "bars": bars, "series": out_series, "warn": warn,
            "legend_src": src, "n_err": nerr, "relative": relative}
+    if calib2:
+        out["calib2"] = calib2
+    if line_series:
+        out["lines"] = line_series
     if lab_note or relative:  # 값 라벨로 보정할 때(또는 상대값에서 위를 넓혔을 때) 다시 잡은 그림 영역
         out["box"] = {"x0": bx.get("plot_x0", bx["x0"]), "y0": bx["y0"], "x1": bx["x1"], "y1": bx["y1"]}
+    return out
+
+
+def _ink_color(a, boxes):
+    """글자 상자들 속 진한 픽셀의 색 (중앙값) → (#rrggbb, 채도) 또는 (None, 0)"""
+    px = []
+    for b in boxes or []:
+        x0, y0, x1, y1 = [int(round(float(t))) for t in b[:4]]
+        q = a[max(0, y0):max(0, y1), max(0, x0):max(0, x1)].reshape(-1, 3).astype(float)
+        if q.size:
+            px.append(q[D.gray(q) < 170])
+    px = np.concatenate(px) if px else np.zeros((0, 3))
+    if len(px) < 10:
+        return None, 0.0
+    c = np.median(px, axis=0)
+    return D.rgb2hex(c), float(c.max() - c.min())
+
+
+def _side_colors(a, ax, lb):
+    """왼쪽·오른쪽 값축 글자 색: 눈금 글자, 그다음 축 제목(눈금 글자 바깥 띠) — 색이 있는 쪽을 쓴다. → (왼쪽 색, 채도, 오른쪽 색, 채도)"""
+    H, W = a.shape[:2]
+    box = ax["box"]
+    rl = D.right_labels(a, ax)
+    y0, y1 = int(box["y0"]), int(box["y1"])
+    lbx, rbx = lb.get("y_boxes") or [], rl.get("boxes") or []
+    out = []
+    for ticks, strip in ((lbx, [0, y0, min([b[0] for b in lbx] + [int(box["x0"]) - 4]) - 2, y1]),
+                         (rbx, [max([b[2] for b in rbx] + [int(box["x1"]) + 4]) + 2, y0, W, y1])):
+        c, sat = _ink_color(a, ticks)
+        if not c or sat <= 60:
+            c2, s2 = _ink_color(a, [strip]) if strip[2] - strip[0] >= 4 else (None, 0.0)
+            if c2 and s2 > 60:
+                c, sat = c2, s2
+        out += [c, sat]
+    return tuple(out)
+
+
+def _axis_sides(a, ax, lb, colors, names, v):
+    """계열마다 왼쪽·오른쪽 값축: (1) 축 눈금 글자 색 — 한쪽 글자가 색이 있고 계열 색과 가까우면 그 축,
+    (2) AI 가 범례에서 읽은 축(이름이 같은 항목), (3) 왼쪽. → ["left"|"right", ...]"""
+    lc, ls, rc, rs = _side_colors(a, ax, lb)
+
+    def dist(c1, c2):
+        return float(np.linalg.norm(np.subtract(D.hex2rgb(c1), D.hex2rgb(c2), dtype=float)))
+    leg = {_nm(it.get("name")): str(it.get("axis") or "").lower() for it in (v or {}).get("legend") or [] if it.get("name")}
+    out = []
+    for c, nm in zip(colors, names):
+        side = None
+        dl = dist(c, lc) if lc and ls > 60 else None
+        dr = dist(c, rc) if rc and rs > 60 else None
+        if dr is not None and dr < 90 and (dl is None or dr < dl - 30):
+            side = "right"
+        elif dl is not None and dl < 90 and (dr is None or dl < dr - 30):
+            side = "left"
+        if side is None:
+            ax_ = leg.get(_nm(nm), "")
+            side = "right" if ax_.startswith("r") else "left"
+        out.append(side)
+    return out
+
+
+def _nm(s):
+    return re.sub(r"[^0-9a-z가-힣]+", "", str(s or "").lower())
+
+
+def _combo_lines(lines, bar_series, v, calib):
+    """막대 콤보의 선 → 선 계열 [{name, color, px, kind: "line", axis}] — 이름은 범례(AI)에서 색이 같고 막대 계열이 쓰지 않은 항목"""
+    used = {_nm(s_["name"]) for s_ in bar_series}
+    leg = [it for it in (v or {}).get("legend") or [] if it.get("name") and _nm(it["name"]) not in used]
+    out = []
+    for i, ln in enumerate(lines):
+        best = None
+        for it in leg:
+            cw = D.color_word(it.get("color"))
+            if not cw:
+                continue
+            d = float(np.linalg.norm(np.subtract(D.hex2rgb(cw), D.hex2rgb(ln["color"]), dtype=float)))
+            if d < 120 and (best is None or d < best[0]):
+                best = (d, it)
+        if best:
+            leg.remove(best[1])
+        nm = best[1]["name"] if best else f"선 {i + 1}"
+        out.append({"name": nm, "color": ln["color"], "kind": "line", "mode": "line", "how": "combo", "axis": "left",
+                    "px": [[float(x), float(y)] for x, y in zip(ln["xs"], ln["ys"])], "style": (best[1].get("style") if best else "") or "", "warn": []})
     return out
 
 
@@ -938,12 +1097,17 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
             res["mode"] = "bar"
             det["calib"] = br["calib"]
             det["fit"] = None
+            if br.get("calib2"):  # 이중축 막대: 오른쪽 값축 보정 (오른쪽 막대·선 계열이 씀)
+                det["calib2"] = br["calib2"]
             if br.get("box"):
                 det["box"] = br["box"]
             det["warn"] = list(det.get("warn") or []) + br["warn"]
             nseg = sum(len(b["ends"]) for b in br["bars"])
             res["message"] = (why + f"막대 {len(br['bars'])}개 ({'세로' if br['orient'] == 'v' else '가로'}), 조각 {nseg}개, "
                               f"계열 {len(br['series'])}개, 오차 막대 {br['n_err']}개를 찾았습니다. 결과 탭의 표를 확인하세요.")
+            if br.get("lines"):
+                res["message"] += (f" 막대 위를 지나는 선 {len(br['lines'])}개(" + ", ".join(f"{s_['name']} {len(s_['px'])}점" for s_ in br["lines"])
+                                   + ")도 선 계열로 뽑았습니다.")
             if br.get("relative"):
                 res["relative"] = True
                 res["message"] += (" 값축 숫자가 없어 상대값(" + ("가장 높은 격자선=100" if br["relative"]["ref"] == "grid" else "가장 높은 막대=100")
@@ -976,6 +1140,8 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
     det["colors"] = D.suggest_colors(a, det["box"])
     det["legend_boxes"] = D.find_legend_boxes(a, det["box"])
     det["series"] = D.match_legend(legend, det["colors"])
+    if res["mode"] == "bar" and (res.get("bar") or {}).get("lines"):  # 막대 콤보의 선 계열 (막대 모드에서도 점이 있는 계열)
+        det["series"] = res["bar"]["lines"]
     if res["mode"] == "xy" and det.get("calib") and v and len(v.get("y2_ticks") or []) >= 2:
         try:
             det["calib2"] = right_axis(a, det, v, model)
@@ -993,6 +1159,18 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
         det.setdefault("warn", []).append(f"그래프 안의 삽입 그래프 {len(ins)}개는 자동 추출에서 뺐습니다 — 삽입 그래프 값이 필요하면 ✂ 자르기로 그 영역만 고르세요")
     if res["mode"] == "xy" and det.get("calib") and (use_vlm or xvals or yvals):
         det["series"] = extract_all(a, det, chart_type=vt)
+        if det.get("calib2") and not any(s_.get("calib") for s_ in det["series"]):
+            # 범례가 오른쪽 축 계열을 알려 주지 않음(범례 없는 이중축) → 축 글자(눈금·제목) 색이 계열 색과 같으면 그 축
+            try:
+                sides = _axis_sides(a, det["axes"], det["labels"], [s_.get("color") or "#000000" for s_ in det["series"]],
+                                    [s_.get("name") for s_ in det["series"]], {})
+                if "right" in sides and "left" in sides:
+                    for s_, sd in zip(det["series"], sides):
+                        if sd == "right" and s_.get("px"):
+                            s_["calib"], s_["axis"] = det["calib2"], "right"
+                            det.setdefault("warn", []).append(f"'{s_['name']}' 은(는) 색이 오른쪽 축 글자와 같아 오른쪽 눈금으로 쟀습니다 — 틀리면 데이터 탭에서 '오른쪽 y축'을 끄세요")
+            except Exception:
+                pass
         got = [s for s in det["series"] if s.get("px")]
         if got:
             res["message"] = (res["message"].replace("데이터 탭에서 추출하세요", "결과 탭의 표를 확인하세요").replace("확인하고 결과", "확인하고, 결과") +
@@ -1094,7 +1272,8 @@ def right_axis(a, det, v, model=None):
     tk = [r0 + p for p, n in D._ticks_1d(D._run_len(out_), L - 1)] if out_.size else []
     vals = v.get("y2_ticks") or []
     opts = []
-    args = dict(ticks=tk, majors=tk, edges=(box["y0"], box["y1"]), log=None, reverse=True, hint=None)
+    th = float(np.median([b[3] - b[1] for b in rl["boxes"]])) if rl.get("boxes") else None  # 글자 높이: 눈금 없는 축에서 끝 글자가 축 끝으로 끌려가지 않게
+    args = dict(ticks=tk, majors=tk, edges=(box["y0"], box["y1"]), log=None, reverse=True, hint=None, text_h=th)
     c = D.pair_axis(vals, rl["y"], **args)
     if c:
         opts.append(c)
@@ -1291,10 +1470,19 @@ def table(calib, series):
     return head, rows, cols
 
 
-def export(calib, series, fmt="csv", meta=None, bars=None, orient="v"):
+def export(calib, series, fmt="csv", meta=None, bars=None, orient="v", calib2=None, lines=None):
+    """표 내보내기 (csv·xlsx). 막대면 범주 × 계열 표 + '막대 조각' 시트, 막대 위를 지나는 선(lines, 콤보)은 xlsx 에 '선' 시트로."""
     if bars:
-        head, rows, long_ = bar_table(calib, bars, series, orient)
+        head, rows, long_ = bar_table(calib, bars, series, orient, calib2)
         cols = [("막대 조각", long_)]
+        for ln in lines or []:  # x = 그림 픽셀(범주축은 숫자가 아님) + 가장 가까운 막대의 범주
+            px = ln.get("px") or []
+            if not px:
+                continue
+            own = ln.get("calib") or (calib2 if calib2 and ln.get("axis") == "right" else calib)
+            ys = D.to_data(own, [p_[0] for p_ in px], [p_[1] for p_ in px])[1]
+            near = lambda x: min(bars, key=lambda b_: abs(b_["c"] - x)).get("cat") or ""  # noqa: E731
+            cols.append(("선 " + str(ln.get("name") or ""), [[round(float(p_[0]), 1), near(p_[0]), float(y_)] for p_, y_ in sorted(zip(px, ys), key=lambda q: q[0][0])]))
     else:
         head, rows, cols = table(calib, series)
     base = re.sub(r'[\\/:*?"<>|\s]+', "_", ((meta or {}).get("name") or "digitized").strip()) or "digitized"
@@ -1317,12 +1505,11 @@ def export(calib, series, fmt="csv", meta=None, bars=None, orient="v"):
                     s_ = series[ci]
                     xs_ = D.to_data(s_.get("calib") or calib, [p[0] for p in s_["px"]], [p[1] for p in s_["px"]])[0]
                     fl = {round(float(x), 9): f for x, f in zip(xs_, interp_flags(s_))}
-                sh.append(["범주", "계열", "아래 끝", "위 끝", "조각 값"] if bars else ["x", "y"] + (["보간됨"] if fl else []))
+                sh.append((["범주", "계열", "아래 끝", "위 끝", "조각 값"] if ci == 0 else ["x(그림 픽셀)", "가까운 범주", "값"]) if bars else ["x", "y"] + (["보간됨"] if fl else []))
                 for r in d:
                     sh.append(list(r) + ((["보간" if fl.get(round(float(r[0]), 9)) else ""]) if fl else []))
             info = wb.create_sheet("보정")
-            for k in ("x", "y"):
-                c = calib[k]
+            for k, c in [("x", calib["x"]), ("y", calib["y"])] + ([("오른쪽 y", calib2["y"])] if bars and calib2 else []):
                 if c.get("cat"):
                     info.append([f"{k}축", "범주축 (막대 위치)"])
                     continue
@@ -1343,8 +1530,11 @@ def export(calib, series, fmt="csv", meta=None, bars=None, orient="v"):
     return ("﻿" + s.getvalue()).encode("utf-8"), base + ".csv", "text/csv; charset=utf-8"
 
 
-def bar_values(calib, bar, orient):
-    """막대 하나(픽셀) → (조각 위 끝 값들, 오차 [위, 아래] 값). 화면처럼 보정으로 바꾼다."""
+def bar_values(calib, bar, orient, calib2=None):
+    """막대 하나(픽셀) → (조각 위 끝 값들, 오차 [위, 아래] 값). 화면처럼 보정으로 바꾼다.
+    오른쪽 값축 막대(bar["axis"] == "right", 이중축)는 calib2(오른쪽 보정)로."""
+    if calib2 and bar.get("axis") == "right":
+        calib = calib2
     ends = bar.get("ends") or []
     if orient == "h":
         vs = D.to_data(calib, ends, [bar["c"]] * len(ends))[0]
@@ -1363,17 +1553,17 @@ def bar_values(calib, bar, orient):
     return [float(x) for x in vs], err
 
 
-def bar_table(calib, bars, series, orient="v"):
+def bar_table(calib, bars, series, orient="v", calib2=None):
     """범주 × 계열 표 (화면 barRows 와 같은 규칙): 같은 범주 이름(그룹+이름) 아래 나란한 막대는 한 줄에 계열별로.
     쌓인 막대가 있으면 '막대 끝(합계)', 오차 막대가 있는 계열마다 '오차 +/−'. long: 조각마다 한 줄"""
-    names = [s.get("name") or f"계열 {i + 1}" for i, s in enumerate(series)]
+    names = [(s.get("name") or f"계열 {i + 1}") + (" (오른쪽 축)" if calib2 and s.get("axis") == "right" else "") for i, s in enumerate(series)]
     nm = lambda j: names[j] if j < len(names) else f"계열 {j + 1}"  # noqa: E731
     used = sorted({j for b in bars for j in b.get("series") or []})
     stacked = any(len(b.get("ends") or []) > 1 for b in bars)
     err_s = sorted({b["series"][-1] for b in bars if b.get("err")})
     rows, idx, long_ = [], {}, []
     for b in bars:
-        tops, err = bar_values(calib, b, orient)
+        tops, err = bar_values(calib, b, orient, calib2)
         seg, prev = {}, 0.0
         for j, t in zip(b.get("series") or [], tops):
             seg[j] = seg.get(j, 0.0) + t - prev
@@ -1549,7 +1739,7 @@ class H(BaseHTTPRequestHandler):
                 return self._send(extract(req.get("id"), req["calib"], req["box"], req.get("series") or {}, req.get("excludes") or ()))
             if self.path == "/api/export":
                 body, name, ctype = export(req["calib"], req.get("series") or [], req.get("format") or "csv", req.get("meta"),
-                                           req.get("bars"), req.get("orient") or "v")
+                                           req.get("bars"), req.get("orient") or "v", req.get("calib2"), req.get("lines"))
                 return self._send(body, ctype, filename=name)
             if self.path == "/api/save":
                 return self._send({"pid": save_project(req.get("project") or {})})

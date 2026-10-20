@@ -775,6 +775,64 @@ try:
         assert all("상대값" in h_ for h_ in head[1:]), head
         ROWS.append(("상대값-묶음막대", "3계열", 36, 0.0, float("nan"), max(errs), None))
 
+    if app._has("matplotlib"):
+        # 2026-10-20 이중축 막대 + 선: 막대(왼쪽) + 선(오른쪽), 두 축을 나눠 쓰는 맞붙은 좁은 막대(오른쪽 로그), 막대를 가로지르는 추세 파선
+        _rb = app.vlm_read_blobs
+        app.vlm_read_blobs = lambda *a_, **k_: None  # 글자 덩어리는 못 읽음 — 눈금 목록만으로 짝짓기
+        try:
+            for kind in ("bar_line_twin", "bars_both", "dashed_across"):
+                png, tr = S.combo_case(kind)
+                if OUT:
+                    open(os.path.join(OUT, f"combo_{kind}.png"), "wb").write(png)
+                # 범례의 축(AI)은 bar_line_twin 에만 준다 — bars_both 는 축 글자 색만으로 정해야 함
+                leg = [{"name": n_, "color": c_, "style": "line", **({"axis": a_} if kind == "bar_line_twin" else {})}
+                       for n_, c_, a_ in zip(tr["names"], tr["colors"], tr["axes"])]
+                app.chat_vision = vlm_with({"x_ticks": [], "y_ticks": tr["ticks"], "y2_ticks": tr["ticks2"], "chart_type": "bar", "legend": leg})
+                r = app.auto(app.save_image(png)["id"])
+                br = r.get("bar") or {}
+                assert r["mode"] == "bar" and br.get("ok"), (kind, r["message"])
+                got = sorted(br["bars"], key=lambda b_: b_["c"])
+                assert len(got) == len(tr["bars"]), f"{kind}: 막대 {len(got)}개 (참 {len(tr['bars'])}개)"
+                names_ = {s_["name"]: s_ for s_ in br["series"]}
+                assert set(names_) == {t["series"] for t in tr["bars"]}, (kind, list(names_))
+                errs = []
+                for b, t in zip(got, tr["bars"]):
+                    tops, _ = app.bar_values(br["calib"], b, "v", br.get("calib2"))
+                    assert len(tops) == 1, f"{kind}: 선이 막대를 조각으로 나눔 {tops}"
+                    assert br["series"][b["series"][0]]["name"] == t["series"], f"{kind}: 계열 섞임"
+                    assert (b.get("axis") or "left") == t["axis"], f"{kind}: {t['series']} 축 {b.get('axis')} (참 {t['axis']})"
+                    if t["axis"] == "right" and tr["log2"]:
+                        e_ = abs(math.log10(tops[0]) - math.log10(t["top"])) / math.log10(tr["lim2"][1] / tr["lim2"][0])
+                    else:
+                        lim_ = tr["lim2"] if t["axis"] == "right" else tr["lim"]
+                        e_ = abs(tops[0] - t["top"]) / (lim_[1] - lim_[0])
+                    errs.append(e_ * 100)
+                assert max(errs) < 1.0, f"{kind}: 막대 값 오차 {max(errs):.2f}%"
+                assert not any(b_["err"] for b_ in br["bars"]), f"{kind}: 선 끝을 오차 막대로 봄"
+                if any(t["axis"] == "right" for t in tr["bars"]) or any(l_["axis"] == "right" for l_ in tr["lines"]):
+                    assert br.get("calib2") and r["detect"].get("calib2"), f"{kind}: 오른쪽 축 보정 없음"
+                    head, _, _ = app.bar_table(br["calib"], br["bars"], br["series"], "v", br["calib2"])
+                    assert any("오른쪽 축" in h_ for h_ in head) == any(t["axis"] == "right" for t in tr["bars"]), (kind, head)
+                else:
+                    assert not br.get("calib2"), kind
+                lines_ = [g for g in r["detect"]["series"] if g.get("px")]
+                assert len(lines_) == len(tr["lines"]), f"{kind}: 선 {[g['name'] for g in lines_]} (참 {[l_['name'] for l_ in tr['lines']]})"
+                le = 0.0
+                for g in lines_:
+                    lt = next(l_ for l_ in tr["lines"] if l_["name"] == g["name"])
+                    assert g.get("axis") == lt["axis"], (kind, g["name"], g.get("axis"))
+                    d = np.asarray(app.series_data(r["detect"]["calib"], g), float)
+                    lim_ = tr["lim2"] if lt["axis"] == "right" else tr["lim"]
+                    e = np.abs(d[:, 1] - np.interp(d[:, 0], lt["px"], lt["val"])) / (lim_[1] - lim_[0]) * 100
+                    cov = (d[:, 0].max() - d[:, 0].min()) / (lt["px"][-1] - lt["px"][0])
+                    assert e.max() < 1.5 and cov > 0.85, (kind, g["name"], e.max(), cov)
+                    le = max(le, float(e.max()))
+                if kind == "dashed_across":  # 한 축 그림: 오른쪽 축·축 글자 없음
+                    assert all(s_["axis"] == "left" for s_ in br["series"])
+                ROWS.append((f"콤보-{kind}", f"{len(br['series'])}+{len(lines_)}선", len(got), 0.0, float(np.sqrt(np.mean(np.square(errs)))), max(max(errs), le), None))
+        finally:
+            app.vlm_read_blobs = _rb
+
     # 기울어진 스캔(1.5°): 축선 각도로 바로 세우고 결과에 각도를 남김
     png, tr = S.pillow_plot([dict(name="sin", color=(31, 119, 180), kind="line", x=xs, y=np.sin(xs)),
                              dict(name="cos", color=(214, 39, 40), kind="line", x=xs, y=0.6 * np.cos(xs))],

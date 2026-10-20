@@ -403,17 +403,17 @@ def detect_bars(a, box, base_row, axis_rows=None, left_col=None):
     # 맞붙은 막대(묶음 막대) 나누기: 바닥 색이 바뀌는 곳
     split = []
     for l, r, k in bars:
-        if k != "fill" or r - l < 16:
+        if k != "fill" or r - l < 9:
             split.append((l, r, k))
             continue
         bm = sub[max(0, h - 42):h - 2, l:r + 1].astype(float).mean(axis=0)  # 빗금 무늬도 열마다 같아지게 40행 평균
         cuts = [l]
-        q = 6
-        for c in range(q, r - l + 1 - q):
+        q = 6 if r - l >= 16 else 4  # 좁은 막대 둘이 맞붙은 묶음(폭 8px 안팎, 이중축 막대)은 좁은 창으로
+        for c in range(q, r - l + 1 - q + (q < 6)):
             L_, R_ = bm[c - q:c], bm[c:c + q]
             dl = np.sqrt(((L_.mean(axis=0) - R_.mean(axis=0)) ** 2).sum())
             noise = (np.sqrt((L_.std(axis=0) ** 2).sum()) + np.sqrt((R_.std(axis=0) ** 2).sum())) / 2  # 무늬면 창 안에서도 출렁임
-            if dl > 90 and dl > 3 * noise and c + l - cuts[-1] >= 6:
+            if dl > 90 and dl > 3 * noise and c + l - cuts[-1] >= min(q, 6):
                 cuts.append(l + c)
         cuts.append(r + 1)
         for s_, e_ in zip(cuts[:-1], cuts[1:]):
@@ -561,7 +561,7 @@ def _measure(sub, ink, g, l, r, h):
         row = ink[y]
         # 막대 안: 폭 전체를 잇는 줄(테두리·채움) / 표본 띠에 잉크(무늬) / 양 벽이 다 있음(빈 막대)
         full_ = _contig(row, l, r) >= 0.85 * w or (row[wl].any() and row[wr].any())
-        if full_ or row[st].mean() >= 0.12:
+        if full_ or row[st].mean() >= max(0.12, 1.5 / len(st)):  # 좁은 막대: 세로 격자선 한 열만으로는 막대가 이어지지 않음
             top, gap = y, 0
             if full_:
                 solid = y
@@ -641,9 +641,9 @@ def _segments_of(sub, ink, g, l, r, st, t_in, h, top_px):
     win = max(int(np.clip(0.25 * w, 6, 14)), _period(feat[:, 0]))  # 무늬 한 주기보다 넓게
     n = len(ys)
 
-    def wmean(a_, b_):
+    def wmean(a_, b_, least=1):
         idx = [i for i in range(max(0, a_), min(n, b_)) if keep[i]]
-        return feat[idx].mean(axis=0) if idx else None
+        return feat[idx].mean(axis=0) if len(idx) >= least else None
 
     def dist(p, q):
         if p is None or q is None:
@@ -651,8 +651,8 @@ def _segments_of(sub, ink, g, l, r, st, t_in, h, top_px):
         c = np.sqrt(((p[1:] - q[1:]) ** 2).sum()) * min(p[0], q[0]) / 255.0
         return float(c + abs(p[0] - q[0]) * 0.9)
     score = np.zeros(n)
-    for i in range(1, n):
-        score[i] = dist(wmean(i - win, i), wmean(i, i + win))
+    for i in range(1, n):  # 창이 3행 미만(꼭대기 바로 밑 한 행 — 막대 위에 그린 격자선)이면 경계로 보지 않음
+        score[i] = dist(wmean(i - win, i, 3), wmean(i, i + win, 3))
     cuts = []  # (행 위치(경계, sub 좌표), 종류)
     for s, e in lines:
         c = (s + e) / 2
@@ -1075,6 +1075,255 @@ def one_series_by_color(bars, series, vlm_legend=None):
     if d.min() <= 0 or d.std() > 0.08 * d.mean() or d.min() - max(ws) < 0.15 * float(np.median(ws)):
         return False  # 고르지 않은 간격(묶음) 또는 맞붙은 막대
     return True
+
+
+def _bg(px):
+    """배경(흰색·연한 격자) 픽셀인가 — px (..., 3)"""
+    px = np.asarray(px, np.int16)
+    return (D.gray(px) > 200) & ((px.max(axis=-1) - px.min(axis=-1)) < 40)
+
+
+def overlay_lines(a, ax, bars, seeds, avoid=()):
+    """막대 위를 지나는 선(추세선·선 계열, 실선·파선) 찾기 — 막대 콤보 차트.
+    seeds: 선 후보 색 [{"color": "#rrggbb", ...}] (범례에서 막대가 아닌 항목). 막대 상자(1차 검출)·avoid(범례 상자) 밖에서
+    그 색의 가는 획을 찾아, 끝이 서로 이어지는(기울기로 내다본 높이가 맞는) 조각끼리 잇는다.
+    → [{"seed": 번호, "color", "thick": 획 두께(px), "xs": 열, "ys": 중심 행}] (원래 그림 좌표, 막대에 가린 열은 비어 있음)"""
+    H, W = a.shape[:2]
+    box = ax["box"]
+    X0, X1 = int(math.ceil(box["x0"])) + 3, int(math.floor(box["x1"])) - 3
+    Y0, Y1 = int(math.ceil(box["y0"])) + 2, int(ax["xaxis"]["r0"])
+    if X1 - X0 < 40 or Y1 - Y0 < 40:
+        return []
+    sub = a[Y0:Y1, X0:X1].astype(np.int16)
+    h, w = sub.shape[:2]
+    excl = np.zeros((h, w), bool)
+    for b in bars:
+        l_, r_ = int(b["l"]) - 1 - X0, int(math.ceil(b["r"])) + 1 - X0
+        t_ = int(min(b["top_outer"], b["top_px"])) - 1 - Y0
+        excl[max(0, t_):, max(0, l_):max(0, r_)] = True
+    for q in avoid:
+        excl[max(0, int(q[1]) - Y0 - 2):max(0, int(q[3]) - Y0 + 3), max(0, int(q[0]) - X0 - 2):max(0, int(q[2]) - X0 + 3)] = True
+    maxt = max(8, int(0.025 * h))
+    maxgap = max(40, int(0.12 * w))
+    out = []
+    for si, sd in enumerate(seeds):
+        try:
+            C = np.array(D.hex2rgb(sd["color"]), float)
+        except Exception:
+            continue
+        M = (np.sqrt(((sub - C) ** 2).sum(axis=2)) < 80) & ~excl & ~_bg(sub)
+        if M.sum() < 30:
+            continue
+        C = np.median(sub[M].reshape(-1, 3), axis=0)  # 실제 획 색으로 다시
+        M = (np.sqrt(((sub - C) ** 2).sum(axis=2)) < 60) & ~excl
+        lab, n = _label(M)
+        if not n:
+            continue
+        comps = []
+        try:
+            from scipy import ndimage
+            objs = ndimage.find_objects(lab)
+        except ImportError:
+            objs = [None] * n
+        for i in range(n):
+            sl = objs[i]
+            if sl is None:
+                ys_, xs_ = np.nonzero(lab == i + 1)
+                if not len(xs_):
+                    continue
+                sl = (slice(ys_.min(), ys_.max() + 1), slice(xs_.min(), xs_.max() + 1))
+            m = lab[sl] == i + 1
+            cols = np.nonzero(m.any(axis=0))[0]
+            if len(cols) < 3:
+                continue
+            th = m.sum(axis=0)[cols]
+            if np.median(th) > maxt or m.sum() < 6:
+                continue
+            ry = np.arange(m.shape[0])[:, None]
+            cy = (m * ry).sum(axis=0)[cols] / th + sl[0].start
+            comps.append({"x": cols + sl[1].start, "y": cy, "t": th})
+        if not comps:
+            continue
+        comps.sort(key=lambda c_: c_["x"][0])
+
+        def pred(cx, cy_, x):  # 사슬 끝(30열)의 기울기로 x 에서의 높이를 내다봄
+            right = x > cx[-1]
+            k = min(len(cx), 30)
+            px_, py_ = (cx[-k:], cy_[-k:]) if right else (cx[:k], cy_[:k])
+            if k >= 4 and px_[-1] != px_[0]:
+                return float(np.polyval(np.polyfit(px_, py_, 1), x))
+            return float(py_[-1] if right else py_[0])
+        best = None
+        left = list(range(len(comps)))
+        while left:  # 가장 긴 조각에서 시작해 양쪽으로 잇기 — 이 색의 선이 둘 이상이면 차례로
+            s0 = max(left, key=lambda i: len(comps[i]["x"]))
+            chain = [s0]
+            left.remove(s0)
+            for side in (1, -1):
+                while True:
+                    cx = np.concatenate([comps[i]["x"] for i in chain])
+                    cy_ = np.concatenate([comps[i]["y"] for i in chain])
+                    o = np.argsort(cx)
+                    cx, cy_ = cx[o], cy_[o]
+                    cand = []
+                    for i in left:
+                        c_ = comps[i]
+                        if side > 0 and c_["x"][0] > cx[-1] - 1 and c_["x"][0] - cx[-1] <= maxgap:
+                            g_ = c_["x"][0] - cx[-1]
+                            e_ = abs(pred(cx, cy_, c_["x"][0]) - c_["y"][0])
+                        elif side < 0 and c_["x"][-1] < cx[0] + 1 and cx[0] - c_["x"][-1] <= maxgap:
+                            g_ = cx[0] - c_["x"][-1]
+                            e_ = abs(pred(cx, cy_, c_["x"][-1]) - c_["y"][-1])
+                        else:
+                            continue
+                        if e_ > 4 + 0.08 * g_ and len(c_["x"]) >= 6 and len(cx) >= 6:
+                            # 꺾인 선(꼭짓점이 막대에 가림): 사슬 끝과 조각 끝에서 각자 기울기로 뻗은 두 반직선이 틈 안에서 만나면 이어진 것
+                            k1 = min(len(cx), 30)
+                            k2 = min(len(c_["x"]), 30)
+                            if side > 0:
+                                xa_, ya_, s1 = cx[-1], cy_[-1], np.polyfit(cx[-k1:], cy_[-k1:], 1)[0]
+                                xb_, yb_, s2 = c_["x"][0], c_["y"][0], np.polyfit(c_["x"][:k2], c_["y"][:k2], 1)[0]
+                            else:
+                                xa_, ya_, s1 = c_["x"][-1], c_["y"][-1], np.polyfit(c_["x"][-k2:], c_["y"][-k2:], 1)[0]
+                                xb_, yb_, s2 = cx[0], cy_[0], np.polyfit(cx[:k1], cy_[:k1], 1)[0]
+                            ks = [xa_, xb_] + ([(yb_ - ya_ + s1 * xa_ - s2 * xb_) / (s1 - s2)] if abs(s1 - s2) > 1e-6 else [])
+                            e_ = min(abs(ya_ + s1 * (q - xa_) - (yb_ + s2 * (q - xb_))) + (0 if xa_ - 2 <= q <= xb_ + 2 else 99) for q in ks)
+                        if e_ <= 4 + 0.08 * g_:
+                            cand.append((e_, g_, i))
+                    if not cand:
+                        break
+                    i = min(cand, key=lambda c_: (c_[1], c_[0]))[2]  # 가장 가까운 조각부터 (멀리 건너뛰면 사이 조각이 남음)
+                    chain.append(i)
+                    left.remove(i)
+            xs = np.concatenate([comps[i]["x"] for i in chain])
+            span = int(xs.max() - xs.min() + 1)
+            cov = len(np.unique(xs))
+            if span >= 0.25 * w and cov >= 0.3 * span and (len(chain) >= 3 or cov >= 0.25 * w):
+                if best is None or cov > best[0]:
+                    best = (cov, chain)
+            if len(chain) == 1:
+                break  # 남은 것은 더 짧은 조각뿐
+        if best is None:
+            continue
+        xs = np.concatenate([comps[i]["x"] for i in best[1]])
+        ys = np.concatenate([comps[i]["y"] for i in best[1]])
+        ts = np.concatenate([comps[i]["t"] for i in best[1]])
+        o = np.argsort(xs)
+        xs, ys, ts = xs[o], ys[o], ts[o]
+        u, idx = np.unique(xs, return_index=True)
+        ys = np.array([ys[xs == x_].mean() for x_ in u])
+        # 막대 상자 안(1차 검출에서 뺀 열): 선이 막대 위에 그려졌으면 그 색의 가는 획을 이웃 관측에서 내다본 높이 근처에서 찾는다
+        tt = float(np.median(ts))
+        Mi = np.sqrt(((sub - C) ** 2).sum(axis=2)) < 60
+        ax_, ay_ = [], []
+        ux = set(int(q) for q in u)
+        for x_ in range(int(u[0]) + 1, int(u[-1])):
+            if x_ in ux:
+                continue
+            j = int(np.searchsorted(u, x_))
+            c0 = float(np.interp(x_, u, ys))
+            dgap = min(x_ - u[j - 1], u[j] - x_)
+            R = int(min(40, tt + 2 + 0.35 * dgap))
+            lo_, hi_ = max(0, int(c0) - R), min(h, int(c0) + R + 1)
+            best_ = None
+            for a_, b_ in D.runs(Mi[lo_:hi_, x_]):
+                if b_ - a_ + 1 <= tt + 3:
+                    cc = lo_ + (a_ + b_) / 2
+                    if best_ is None or abs(cc - c0) < abs(best_ - c0):
+                        best_ = cc
+            if best_ is not None:
+                ax_.append(x_)
+                ay_.append(best_)
+        if ax_:
+            u2 = np.concatenate([u, np.array(ax_)])
+            y2 = np.concatenate([ys, np.array(ay_)])
+            o = np.argsort(u2)
+            u, ys = u2[o], y2[o]
+        # 지울 범위는 양 끝을 기울기대로 조금 늘림 (1차 막대 상자에 가린 첫·끝 조각 — 축선에 닿은 파선 조각이 가짜 막대로 잡힘)
+        k = min(len(u), 30)
+        pl, pr = np.polyfit(u[:k], ys[:k], 1), np.polyfit(u[-k:], ys[-k:], 1)
+        el = np.arange(max(0, u[0] - maxgap), u[0])
+        er = np.arange(u[-1] + 1, min(w, u[-1] + 1 + maxgap))
+        ex = np.concatenate([el, u, er])
+        ey = np.concatenate([np.polyval(pl, el), ys, np.polyval(pr, er)])
+        out.append({"seed": si, "color": D.rgb2hex(C), "thick": float(np.median(ts)), "xs": (u + X0).astype(float), "ys": ys + Y0,
+                    "ex": (ex + X0).astype(float), "ey": ey + Y0})
+    return out
+
+
+def erase_lines(a, lines, base_row, bars=()):
+    """막대 위를 지나는 선을 지운 그림 (막대 검출용). 열마다 선 중심 ± 두께/2 띠:
+    아래가 바탕이면 바탕으로, 위·아래가 칠한 면이면 그 면으로(막대 속을 지나는 선). 위가 바탕·아래가 막대면 막대 끝이 선에 가린 것 —
+    같은 막대(bars: 1차 검출 [{l, r}])에서 끝이 보이는 열이 있으면 그 높이로, 막대 끝 전체가 가렸으면 띠 가운데까지 막대로 둔다.
+    (선 색과 막대 색이 같고 막대 끝이 띠 안에 보이는 열은 그대로)"""
+    out = a.copy()
+    H, W = a.shape[:2]
+    white = np.array([255, 255, 255], a.dtype)
+    hid = {}  # 막대 끝이 선에 가린 열 → (lo, hi, c, 아래 색)
+    for ln in lines:
+        C = np.array(D.hex2rgb(ln["color"]), float)
+        t = float(ln["thick"])
+        xs, ys = ln.get("ex", ln["xs"]), ln.get("ey", ln["ys"])
+        for x in range(int(xs[0]), int(xs[-1]) + 1):
+            c = float(np.interp(x, xs, ys))
+            lo, hi = int(math.floor(c - t / 2 - 1)), int(math.ceil(c + t / 2 + 1))
+            lo, hi = max(1, lo), min(int(base_row) - 1, hi)
+            if hi < lo or x < 0 or x >= W:
+                continue
+            col = out[lo:hi + 1, x].astype(float)
+            isl = np.sqrt(((col - C) ** 2).sum(axis=1)) < 70
+            if not isl.any():
+                continue  # 파선의 빈 틈
+            ab = out[max(0, lo - 3):lo, x]
+            bl = out[hi + 1:min(int(base_row), hi + 4), x]
+            above = np.median(ab, axis=0) if len(ab) else white
+            below = np.median(bl, axis=0) if len(bl) else white
+            bgA, bgB = bool(_bg(above)), bool(_bg(below)) or hi + 1 >= int(base_row)
+            rows = np.arange(lo, hi + 1)
+            if bgB:
+                out[lo:hi + 1, x] = white if bgA else np.where((rows < c)[:, None], above, white)
+                continue
+            if not bgA:
+                out[lo:hi + 1, x] = np.where((rows < c)[:, None], above, below)
+                continue
+            # 위는 바탕, 아래는 막대: 막대 끝이 띠 안
+            same = np.sqrt(((below.astype(float) - C) ** 2).sum()) < 70
+            nb = ~_bg(col)
+            if same:
+                top = int(np.argmax(nb)) + lo if nb.any() else hi + 1
+                if top > c - t / 2 + 1.5:
+                    continue  # 선이 없는 열(파선 틈) — 막대 끝이 띠 안에 그대로 보임
+            else:
+                last = int(np.nonzero(isl)[0].max()) + lo
+                gap = _bg(out[last + 1:hi + 1, x])
+                if gap.any():  # 선 아래로 바탕이 보이면 막대 끝은 선 아래 — 선만 지움
+                    out[lo:last + 2, x] = white
+                    continue
+            hid[x] = (lo, hi, c, below)
+    for b in bars:  # 가린 열: 같은 막대에서 끝이 보이는 열의 높이로
+        l_, r_ = int(math.ceil(b["l"])), int(math.floor(b["r"])) - 1
+        xs_ = [x for x in range(l_, r_ + 1) if x in hid]
+        if not xs_:
+            continue
+        vis = []
+        w0, w1 = max(0, min(hid[q][0] for q in xs_) - 8), max(hid[q][1] for q in xs_) + 8
+        for x in range(l_ + 1, r_):
+            if x in hid:
+                continue
+            nb = ~_bg(out[w0:int(base_row), x])
+            top_ = int(np.argmax(nb)) + w0 if nb.any() else None
+            if top_ is not None and w0 < top_ <= w1:
+                vis.append(top_)
+        if len(vis) >= 2:
+            T = float(np.median(vis))
+            for x in xs_:
+                lo, hi, c, below = hid.pop(x)
+                rows = np.arange(lo, hi + 1)
+                out[lo:hi + 1, x] = np.where((rows < T)[:, None], white, below)
+    for x, (lo, hi, c, below) in hid.items():  # 막대 끝 전체가 선에 가림 → 띠 가운데
+        rows = np.arange(lo, hi + 1)
+        out[lo:hi + 1, x] = np.where((rows < c)[:, None], white, below)
+    return out
 
 
 def axis_break(a, ax):
