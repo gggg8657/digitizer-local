@@ -770,7 +770,7 @@ def auto(iid, use_vlm=True, model=None, xvals=None, yvals=None, chart="auto", wh
     3D·극좌표·파이·히트맵·등고선처럼 2D 직교좌표가 아닌 그림은 자동 추출을 멈추고 code="unsupported_chart", unsupported={kind, label, why}
     를 돌려준다 (force=True 면 거절하지 않고 경고만)."""
     res = {"detect": None, "vlm": None, "error": None, "mode": "xy", "bar": None, "panels": [], "need_panel": False, "message": "",
-           "code": None, "unsupported": None, "deskew": None}
+           "code": None, "unsupported": None, "deskew": None, "relative": False}
     if deskew:
         try:
             info2, ang = deskew_image(iid)
