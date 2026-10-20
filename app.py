@@ -1585,6 +1585,9 @@ def bar_table(calib, bars, series, orient="v", calib2=None):
         nm0 = nm
         nm = lambda j: f"{nm0(j)} (상대값)"  # noqa: E731
     head = ["범주"] + [nm(j) for j in used] + (["막대 끝(합계)"] if stacked else []) + [f"{nm(j)} 오차 {c}" for j in err_s for c in "+−"]
+    if stacked and all(len(r["tops"]) != 1 for r in rows):  # 묶음 막대에서 조각 하나가 잘못 갈라진 경우 — 합계 칸이 전부 비면 빼기
+        stacked = False
+        head = [h for h in head if h != "막대 끝(합계)"]
     out = [[r["cat"]] + [r["seg"].get(j, "") for j in used] + ([r["tops"][0] if len(r["tops"]) == 1 else ""] if stacked else [])
            + [v for j in err_s for v in r["err"].get(j, ["", ""])] for r in rows]
     return head, out, long_
